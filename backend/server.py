@@ -33,6 +33,12 @@ from auth import require_auth, authenticate_user
 # Prevents same account hitting same group in two simultaneous campaigns.
 _active_sends: set[tuple[str, str]] = set()
 
+# ── Per-campaign ban map ───────────────────────────────────────────────────
+# campaign_id → set of (account_id, group_id) pairs where the account got
+# "banned from sending" in that group. Skipped in future cycles of the SAME
+# campaign. Cleared when campaign stops/restarts. New campaigns start fresh.
+_campaign_bans: dict[str, set[tuple[str, str]]] = {}
+
 mongo_url = os.environ['MONGO_URL']
 # Atlas (mongodb+srv://) needs certifi CA bundle; Railway internal MongoDB does not
 mongo_opts = {"tlsCAFile": certifi.where()} if mongo_url.startswith("mongodb+srv") else {}
@@ -580,6 +586,18 @@ def _should_try_next_account(err: str) -> bool:
     ))
 
 
+def _is_group_ban_error(err: str) -> bool:
+    """True if the error means this specific account is banned/blocked in this specific group.
+    NOT a permanent account ban — account is fine for other groups/campaigns."""
+    msg = (err or "").lower()
+    return any(p in msg for p in (
+        "banned from send",
+        "you can't write",
+        "chat_write_forbidden",
+        "chat admin privileges",
+    ))
+
+
 async def _send_to_group(campaign, accounts, start_idx, grp):
     """Deliver the ad to one group. Tries accounts in rotation; handles cooldowns and dedup."""
     success, last_err, used, note, last_acc = False, None, None, None, None
@@ -592,9 +610,16 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
         await log_send(campaign, None, grp, "failed", "All accounts in FloodWait cooldown")
         return
 
+    # Filter: skip accounts banned in this group for this campaign
+    campaign_ban_set = _campaign_bans.get(camp_id, set())
+    unbanned_accounts = [a for a in ready_accounts if (a["id"], grp_id) not in campaign_ban_set]
+    if not unbanned_accounts:
+        # All accounts have been banned in this group — skip silently
+        return
+
     # Filter: cross-campaign dedup — skip (account, group) pairs already being sent
-    dedup_accounts = [a for a in ready_accounts if (a["id"], grp_id) not in _active_sends]
-    effective_accounts = dedup_accounts if dedup_accounts else ready_accounts
+    dedup_accounts = [a for a in unbanned_accounts if (a["id"], grp_id) not in _active_sends]
+    effective_accounts = dedup_accounts if dedup_accounts else unbanned_accounts
 
     n = len(effective_accounts)
     if n == 0:
@@ -639,6 +664,14 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
                 await db.accounts.update_one(
                     {"id": acc["id"]},
                     {"$set": {"status": "banned", "last_error": str(e)}}
+                )
+            # Per-campaign group ban: account banned/blocked in this group
+            # Skip this (account, group) in future cycles of THIS campaign only
+            elif _is_group_ban_error(str(e)):
+                _campaign_bans.setdefault(camp_id, set()).add((acc["id"], grp_id))
+                logger.info(
+                    f"Campaign {camp_id}: banned {acc.get('name',acc['id'])} "
+                    f"from {grp_id} — will skip in future cycles"
                 )
         finally:
             _active_sends.discard(send_key)
@@ -733,6 +766,11 @@ async def campaign_loop(campaign_id: str):
         await _force_flush_counter(campaign_id)
         await db.campaigns.update_one({"id": campaign_id},
             {"$set": {"status": "stopped", "last_error": f"Crashed: {e}"}})
+    finally:
+        # Clean up per-campaign ban map — new campaign start = fresh slate
+        bans = _campaign_bans.pop(campaign_id, set())
+        if bans:
+            logger.info(f"Campaign {campaign_id}: cleared {len(bans)} account-group bans")
 
 
 async def log_send(campaign, acc, grp, status, error):
@@ -1126,35 +1164,41 @@ async def lifespan(application: FastAPI):
     else:
         logger.info(f"Using local media storage at {storage.LOCAL_ROOT}")
 
-    # Database indexes
-    await db.logs.create_index([("timestamp", -1)])
-    await db.logs.create_index([("status", 1)])
-    await db.logs.create_index([("campaign_id", 1)])
-    # Compound index for targets-health aggregation (campaign_id + timestamp sort)
-    await db.logs.create_index([("campaign_id", 1), ("timestamp", -1)])
-    await db.accounts.create_index("id", unique=True)
-    await db.accounts.create_index("batch_id")
-    await db.accounts.create_index("status")
-    await db.campaigns.create_index("id", unique=True)
-    await db.campaigns.create_index("status")
-    await db.proxies.create_index("id", unique=True)
+    # Database indexes (non-fatal — app works without them, they're perf optimizations)
+    try:
+        await db.logs.create_index([("timestamp", -1)])
+        await db.logs.create_index([("status", 1)])
+        await db.logs.create_index([("campaign_id", 1)])
+        await db.logs.create_index([("campaign_id", 1), ("timestamp", -1)])
+        await db.accounts.create_index("id", unique=True)
+        await db.accounts.create_index("batch_id")
+        await db.accounts.create_index("status")
+        await db.campaigns.create_index("id", unique=True)
+        await db.campaigns.create_index("status")
+        await db.proxies.create_index("id", unique=True)
+        logger.info("Database indexes ensured")
+    except Exception as e:
+        logger.warning(f"Index creation skipped (non-fatal): {e}")
 
     # Backfill account sections for accounts uploaded before batch tracking existed.
-    NS = uuid.UUID("6f9619ff-8b86-d011-b42d-00cf4fc964ff")
-    legacy = await db.accounts.find({"batch_id": {"$exists": False}}).to_list(10000)
-    migrated = 0
-    for acc in legacy:
-        prefix = (acc.get("name") or "Ungrouped").split(" - ")[0].strip() or "Ungrouped"
-        bid = str(uuid.uuid5(NS, prefix))
-        await db.accounts.update_one({"id": acc["id"]}, {"$set": {"batch_id": bid, "batch_name": prefix}})
-        migrated += 1
-    if migrated:
-        logger.info(f"Backfilled sections for {migrated} legacy accounts")
+    try:
+        NS = uuid.UUID("6f9619ff-8b86-d011-b42d-00cf4fc964ff")
+        legacy = await db.accounts.find({"batch_id": {"$exists": False}}).to_list(10000)
+        migrated = 0
+        for acc in legacy:
+            prefix = (acc.get("name") or "Ungrouped").split(" - ")[0].strip() or "Ungrouped"
+            bid = str(uuid.uuid5(NS, prefix))
+            await db.accounts.update_one({"id": acc["id"]}, {"$set": {"batch_id": bid, "batch_name": prefix}})
+            migrated += 1
+        if migrated:
+            logger.info(f"Backfilled sections for {migrated} legacy accounts")
 
-    await backfill_failed_counts()
-    removed = await cleanup_old_logs()
-    if removed:
-        logger.info(f"Startup log purge freed {removed} old log entries")
+        await backfill_failed_counts()
+        removed = await cleanup_old_logs()
+        if removed:
+            logger.info(f"Startup log purge freed {removed} old log entries")
+    except Exception as e:
+        logger.warning(f"Startup migrations skipped (non-fatal): {e}")
 
     running = await db.campaigns.find({"status": "running"}).to_list(1000)
     for c in running:
