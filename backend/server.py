@@ -34,7 +34,9 @@ from auth import require_auth, authenticate_user
 _active_sends: set[tuple[str, str]] = set()
 
 mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url, tlsCAFile=certifi.where())
+# Atlas (mongodb+srv://) needs certifi CA bundle; Railway internal MongoDB does not
+mongo_opts = {"tlsCAFile": certifi.where()} if mongo_url.startswith("mongodb+srv") else {}
+client = AsyncIOMotorClient(mongo_url, **mongo_opts)
 db = client[os.environ['DB_NAME']]
 
 api_router = APIRouter(prefix="/api")
