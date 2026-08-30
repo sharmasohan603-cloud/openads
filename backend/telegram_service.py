@@ -56,6 +56,19 @@ _account_cooldowns: dict[str, float] = {}
 _media_cache: OrderedDict[str, tuple[bytes, str]] = OrderedDict()
 _MEDIA_CACHE_MAX = 20
 
+# Injected by server.py at startup — allows MongoDB-aware media fetch
+# without circular imports. Falls back to storage.get_object.
+_media_fetcher = None
+
+
+def set_media_fetcher(fetcher):
+    """Inject a custom async media fetcher: async (path: str) -> (bytes, str).
+    Called at app startup by server.py to use MongoDB-stored files.
+    """
+    global _media_fetcher
+    _media_fetcher = fetcher
+
+
 # ── Tunables ─────────────────────────────────────────────────────────────────
 CONCURRENCY = int(os.environ.get("MAX_CONCURRENCY", "12"))
 # Keep at most this many Telegram sessions connected
@@ -151,7 +164,9 @@ async def _get_cached_media(media_path: str) -> tuple[bytes, str]:
         _media_cache.move_to_end(media_path)
         return _media_cache[media_path]
 
-    data, content_type = await storage.get_object(media_path)
+    # Use injected fetcher (MongoDB-aware) if set, otherwise fall back to storage.get_object
+    fetcher = _media_fetcher or storage.get_object
+    data, content_type = await fetcher(media_path)
 
     # Evict LRU if at capacity
     while len(_media_cache) >= _MEDIA_CACHE_MAX:

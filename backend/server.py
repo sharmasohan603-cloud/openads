@@ -491,17 +491,18 @@ async def upload_media(file: UploadFile = File(...), _user: str = Depends(requir
     path = f"{storage.APP_NAME}/uploads/{uuid.uuid4()}.{ext}"
     content = await file.read()
     content_type = file.content_type or storage.MIME_TYPES.get(ext, "application/octet-stream")
-    result = await storage.put_object(path, content, content_type)
-    stored_path = result["path"]
+    # Store bytes in MongoDB — survives Railway redeploys (no ephemeral disk dependency)
+    import base64
     await db.files.insert_one({
         "id": str(uuid.uuid4()),
-        "storage_path": stored_path,
+        "storage_path": path,
         "original_filename": file.filename,
         "content_type": content_type,
+        "data": base64.b64encode(content).decode(),  # persisted in MongoDB
         "is_deleted": False,
         "created_at": now_iso(),
     })
-    return {"media_path": stored_path, "media_url": f"/api/uploads/{stored_path}",
+    return {"media_path": path, "media_url": f"/api/uploads/{path}",
             "filename": file.filename}
 
 
@@ -510,6 +511,13 @@ async def serve_upload(path: str, _user: str = Depends(require_auth)):
     record = await db.files.find_one({"storage_path": path, "is_deleted": False})
     if not record:
         raise HTTPException(status_code=404, detail="Not found")
+    # Prefer MongoDB-stored bytes (survives redeploys)
+    if record.get("data"):
+        import base64
+        data = base64.b64decode(record["data"])
+        ct = record.get("content_type", "application/octet-stream")
+        return StreamingResponse(io.BytesIO(data), media_type=ct)
+    # Fallback: old files stored on disk/cloud
     data, content_type = await storage.get_object(path)
     ct = record.get("content_type", content_type)
     return StreamingResponse(io.BytesIO(data), media_type=ct)
@@ -1272,6 +1280,21 @@ async def lifespan(application: FastAPI):
     logger.info(f"Resumed {len(running)} running campaigns")
     asyncio.create_task(_campaign_watchdog())
     asyncio.create_task(_log_cleanup_loop())
+
+    # Inject MongoDB-aware media fetcher into telegram_service
+    # Files uploaded after this change are stored as base64 in MongoDB (survives redeploys)
+    import base64
+
+    async def _mongo_media_fetcher(path: str) -> tuple[bytes, str]:
+        record = await db.files.find_one({"storage_path": path, "is_deleted": False})
+        if record and record.get("data"):
+            data = base64.b64decode(record["data"])
+            ct = record.get("content_type", "application/octet-stream")
+            return data, ct
+        # Fallback: old files on disk/cloud
+        return await storage.get_object(path)
+
+    tg.set_media_fetcher(_mongo_media_fetcher)
 
     yield  # ← App is running
 
