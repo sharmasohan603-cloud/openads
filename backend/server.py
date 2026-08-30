@@ -607,14 +607,19 @@ def _is_group_ban_error(err: str) -> bool:
 
 
 def _is_dead_group_error(err: str) -> bool:
-    """True if the error means the group itself is deleted/inaccessible for ALL accounts.
-    
-    IMPORTANT: "no user has X as username" is NOT a dead group — it means the account
-    wasn't a member and couldn't resolve it. After joining, it will work fine.
-    Only mark dead when Telegram explicitly says the group/channel doesn't exist.
+    """True if the group is inaccessible for ALL accounts — stop trying, skip in future cycles.
+
+    Includes "no user has X as username": after _proactive_join attempts JoinChannelRequest
+    AND _resolve_entity both fail with this error, the group cannot be reached by any account
+    in this pool (geo-restriction, username changed, or actually deleted).
+    Marking dead saves wasting 12 account retries per cycle on an unreachable group.
     """
     msg = (err or "").lower()
     return any(p in msg for p in (
+        "no user has",
+        "nobody is using this username",
+        "username invalid",
+        "username is unacceptable",
         "peer_id_invalid",
         "channel_invalid",
         "chat_id_invalid",
@@ -712,8 +717,11 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
         finally:
             _active_sends.discard(send_key)
 
-        if not success and last_err and _should_try_next_account(last_err):
-            continue
+        # Break immediately for group-level or non-rotatable errors.
+        # NOTE: in a for loop, `continue` alone is redundant (loop continues anyway).
+        # We need an explicit `break` to stop early.
+        if not success and last_err and not _should_try_next_account(last_err):
+            break
 
     if success:
         await log_send(campaign, used, grp, "success", note)
