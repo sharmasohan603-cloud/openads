@@ -642,6 +642,68 @@ async def _send_with_entity(client: TelegramClient, entity, mtype: str, campaign
     raise ValueError(f"Unknown message type: {mtype}")
 
 
+async def _proactive_join(client: TelegramClient, account_id: str, group_id: str) -> str | None:
+    """Join the group BEFORE trying to resolve entity.
+    
+    Telegram won't let you resolve a group entity (by username) if you're not a member.
+    This must run before _resolve_entity for public groups.
+    """
+    parsed = _parse_group_identifier(group_id)
+    cache_key = (account_id, _group_cache_key(group_id))
+    lock = _join_locks.setdefault(account_id, asyncio.Lock())
+
+    async with lock:
+        if _join_key_is_fresh(cache_key):
+            return None  # already joined this session
+        _mark_join_attempted(cache_key)
+
+        if parsed["kind"] == "invite":
+            try:
+                await client(ImportChatInviteRequest(parsed["invite_hash"]))
+                return "Joined via invite link"
+            except errors.UserAlreadyParticipantError:
+                return None
+            except errors.InviteRequestSentError:
+                return "Join request sent"
+            except errors.FloodWaitError:
+                return None
+            except Exception as e:
+                logger.debug(f"Invite join failed for {group_id}: {e}")
+                return None
+
+        if parsed["kind"] == "username":
+            try:
+                entity = await client.get_entity(parsed["username"])
+                if isinstance(entity, Channel):
+                    if await _is_member(client, entity):
+                        return None
+                    note = await _join_channel_entity(client, entity)
+                    await _join_discussion_group(client, entity)
+                    return note
+            except errors.FloodWaitError:
+                return None
+            except Exception as e:
+                logger.debug(f"Username join failed for {group_id}: {e}")
+                return None
+
+        if parsed["kind"] == "numeric":
+            try:
+                entity = await client.get_entity(parsed["id"])
+                if isinstance(entity, Channel):
+                    if await _is_member(client, entity):
+                        return None
+                    note = await _join_channel_entity(client, entity)
+                    await _join_discussion_group(client, entity)
+                    return note
+            except errors.FloodWaitError:
+                return None
+            except Exception as e:
+                logger.debug(f"Numeric join failed for {group_id}: {e}")
+                return None
+
+    return None
+
+
 async def send_ad_to_group(
     client: TelegramClient,
     group_id: str,
@@ -649,7 +711,10 @@ async def send_ad_to_group(
     account_id: str = None,
     apply_jitter: bool = True,
 ):
-    """Send the ad. Joins the group only when send fails due to not being a member.
+    """Send the ad. Proactively joins the group FIRST, then resolves entity and sends.
+
+    This is the correct order: Telegram won't let you resolve a group entity by username
+    if the account is not a member — you get 'No user has X as username'.
 
     apply_jitter: add random 2-5s delay before sending — reduces spam-flag risk.
     Re-raises FloodWaitError for caller to handle cooldown.
@@ -659,18 +724,25 @@ async def send_ad_to_group(
 
     mtype = campaign["message_type"]
     text = campaign.get("text") or ""
-    entity = await _resolve_entity(client, group_id)
-    join_note = None
 
+    # ── Step 1: Proactively join BEFORE resolving entity ──────────────────────
+    join_note = await _proactive_join(client, account_id, group_id)
+
+    # ── Step 2: Resolve entity (now we're a member so it will work) ───────────
+    entity = await _resolve_entity(client, group_id)
+
+    # ── Step 3: Send, with one retry if membership check missed ───────────────
     for attempt in range(2):
         try:
             return await _send_with_entity(client, entity, mtype, campaign, text, join_note)
         except Exception as e:
             if attempt == 0 and (_needs_join(e) or _needs_discussion_join(e)):
-                join_note = await _try_join(client, account_id, group_id, entity)
+                # Missed by proactive join — try reactive join as safety net
+                extra = await _try_join(client, account_id, group_id, entity)
                 if _needs_discussion_join(e) and isinstance(entity, Channel):
                     disc = await _join_discussion_group(client, entity)
-                    join_note = disc or join_note
+                    extra = disc or extra
+                join_note = extra or join_note
                 continue
 
             # --- Top-level media fallback safety net ---

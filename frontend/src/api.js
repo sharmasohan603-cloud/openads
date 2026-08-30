@@ -62,6 +62,7 @@ export const api = {
   deleteCampaign: (id) => client.delete(`/campaigns/${id}`).then((r) => r.data),
   deleteCampaignAccounts: (id) => client.delete(`/campaigns/${id}/accounts`).then((r) => r.data),
   campaignTargets: (id) => client.get(`/campaigns/${id}/targets-health`).then((r) => r.data),
+  campaignBans: (id) => client.get(`/campaigns/${id}/bans`).then((r) => r.data),
   removeGroups: (id, group_ids) => client.post(`/campaigns/${id}/remove-groups`, { group_ids }).then((r) => r.data),
 
   // Logs
