@@ -1054,6 +1054,13 @@ async def targets_health(campaign_id: str, _user: str = Depends(require_auth)):
     return result
 
 
+@api_router.get("/campaigns/{campaign_id}/bans")
+async def campaign_bans(campaign_id: str, _user: str = Depends(require_auth)):
+    """Return the in-memory list of (account, group) bans for this campaign."""
+    bans = _campaign_bans.get(campaign_id, set())
+    return [{"account_id": a, "group_id": g} for a, g in bans]
+
+
 class RemoveGroups(BaseModel):
     group_ids: List[str]
 

@@ -4,6 +4,7 @@ import { Play, Square, Trash2, Megaphone, Clock, Users, Type, Image as ImageIcon
 import { Button } from "./ui/button";
 import { CampaignCreator } from "./CampaignCreator";
 import { TargetsHealth } from "./TargetsHealth";
+import { BansList } from "./BansList";
 import { api } from "../api";
 
 const typeIcon = { text: Type, media: ImageIcon, forward: Forward };
@@ -141,8 +142,7 @@ export const CampaignList = ({ campaigns, onRefresh, accountCount = 0, accountGr
                 <p className="text-sm font-semibold text-red-400">{c.dead_groups_count || 0}</p>
               </div>
               <div>
-                <p className="text-[10px] font-mono uppercase text-slate-500">Bans</p>
-                <p className="text-sm font-semibold text-amber-400">{c.banned_pairs_count || 0}</p>
+                <BansList campaign={c} bannedCount={c.banned_pairs_count} />
               </div>
             </div>
 
