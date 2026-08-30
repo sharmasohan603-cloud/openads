@@ -643,10 +643,14 @@ async def _send_with_entity(client: TelegramClient, entity, mtype: str, campaign
 
 
 async def _proactive_join(client: TelegramClient, account_id: str, group_id: str) -> str | None:
-    """Join the group BEFORE trying to resolve entity.
-    
-    Telegram won't let you resolve a group entity (by username) if you're not a member.
-    This must run before _resolve_entity for public groups.
+    """Join the group BEFORE resolving entity.
+
+    CRITICAL: Do NOT call client.get_entity(username) here — Telegram returns
+    'No user has X as username' for groups you're not a member of.
+
+    Instead, pass the username string directly to JoinChannelRequest.
+    Telethon resolves it internally via ResolveUsernameRequest which works
+    without membership. Only AFTER joining can you safely call get_entity.
     """
     parsed = _parse_group_identifier(group_id)
     cache_key = (account_id, _group_cache_key(group_id))
@@ -657,6 +661,7 @@ async def _proactive_join(client: TelegramClient, account_id: str, group_id: str
             return None  # already joined this session
         _mark_join_attempted(cache_key)
 
+        # ── Invite link ───────────────────────────────────────────────────────
         if parsed["kind"] == "invite":
             try:
                 await client(ImportChatInviteRequest(parsed["invite_hash"]))
@@ -671,30 +676,40 @@ async def _proactive_join(client: TelegramClient, account_id: str, group_id: str
                 logger.debug(f"Invite join failed for {group_id}: {e}")
                 return None
 
+        # ── Username (e.g. @forex_temes or https://t.me/voipiran_channel) ─────
         if parsed["kind"] == "username":
+            username = parsed["username"]  # already has @ prefix
             try:
-                entity = await client.get_entity(parsed["username"])
-                if isinstance(entity, Channel):
-                    if await _is_member(client, entity):
-                        return None
-                    note = await _join_channel_entity(client, entity)
-                    await _join_discussion_group(client, entity)
-                    return note
+                # Pass the raw username string — Telethon resolves it via
+                # ResolveUsernameRequest (works for non-members, unlike get_entity)
+                await client(JoinChannelRequest(username))
+                # After joining, try to also join linked discussion group
+                try:
+                    entity = await client.get_entity(username)
+                    if isinstance(entity, Channel):
+                        await _join_discussion_group(client, entity)
+                except Exception:
+                    pass
+                return "Joined group"
+            except errors.UserAlreadyParticipantError:
+                return None
+            except errors.InviteRequestSentError:
+                return "Join request sent"
             except errors.FloodWaitError:
                 return None
             except Exception as e:
                 logger.debug(f"Username join failed for {group_id}: {e}")
                 return None
 
+        # ── Numeric ID ────────────────────────────────────────────────────────
         if parsed["kind"] == "numeric":
             try:
-                entity = await client.get_entity(parsed["id"])
-                if isinstance(entity, Channel):
-                    if await _is_member(client, entity):
-                        return None
-                    note = await _join_channel_entity(client, entity)
-                    await _join_discussion_group(client, entity)
-                    return note
+                await client(JoinChannelRequest(parsed["id"]))
+                return "Joined group"
+            except errors.UserAlreadyParticipantError:
+                return None
+            except errors.InviteRequestSentError:
+                return "Join request sent"
             except errors.FloodWaitError:
                 return None
             except Exception as e:
