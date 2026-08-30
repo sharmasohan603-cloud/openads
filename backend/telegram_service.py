@@ -781,13 +781,14 @@ async def send_ad_to_group(
     account_id: str = None,
     apply_jitter: bool = True,
 ):
-    """Send the ad. Proactively joins the group FIRST, then sends.
+    """Send the ad. Joins the group only when send fails due to not being a member.
 
-    _proactive_join returns (join_note, entity_or_None).
-    If the join succeeded, we use the entity directly — no redundant resolve.
-    If the join was skipped (already joined), we resolve via get_entity.
+    This matches the original working logic:
+    1. Resolve entity via get_entity
+    2. Try to send
+    3. If fails with 'needs join' → join reactively → retry
 
-    Re-raises 'no user has' errors for account rotation in server.py.
+    apply_jitter: add random 2-5s delay before sending — reduces spam-flag risk.
     Re-raises FloodWaitError for caller to handle cooldown.
     """
     if apply_jitter:
@@ -796,25 +797,18 @@ async def send_ad_to_group(
     mtype = campaign["message_type"]
     text = campaign.get("text") or ""
 
-    # ── Step 1: Proactively join BEFORE resolving entity ──────────────────────
-    join_note, entity = await _proactive_join(client, account_id, group_id)
+    entity = await _resolve_entity(client, group_id)
+    join_note = None
 
-    # ── Step 2: Resolve entity ONLY if join didn't return one ─────────────────
-    if entity is None:
-        entity = await _resolve_entity(client, group_id)
-
-    # ── Step 3: Send, with one retry if membership check missed ───────────────
     for attempt in range(2):
         try:
             return await _send_with_entity(client, entity, mtype, campaign, text, join_note)
         except Exception as e:
             if attempt == 0 and (_needs_join(e) or _needs_discussion_join(e)):
-                # Missed by proactive join — try reactive join as safety net
-                extra = await _try_join(client, account_id, group_id, entity)
+                join_note = await _try_join(client, account_id, group_id, entity)
                 if _needs_discussion_join(e) and isinstance(entity, Channel):
                     disc = await _join_discussion_group(client, entity)
-                    extra = disc or extra
-                join_note = extra or join_note
+                    join_note = disc or join_note
                 continue
 
             # --- Top-level media fallback safety net ---

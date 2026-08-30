@@ -704,32 +704,27 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
             # Missing media: campaign-level issue — no account can fix it
             if isinstance(e, FileNotFoundError):
                 break  # Stop trying — file is missing for ALL accounts
-            # FloodWait:
-            # - On JoinChannelRequest: only the JOIN is rate-limited for this account.
-            #   The next account may not be rate-limited — try it.
-            # - On SendMessageRequest: true account-level flood, record cooldown and stop.
+            # FloodWait on JoinChannelRequest: join-level rate limit, try next account
+            # FloodWait on SendMessageRequest: account-level, record cooldown and stop
             if tg._is_flood_error(e):
                 if "joinchannelrequest" in last_err.lower():
-                    # Join flood — skip this account, try next (don't set global cooldown)
-                    continue
+                    continue  # Join flood — try next account
                 seconds = getattr(e, "seconds", 60)
                 tg.set_account_cooldown(acc["id"], seconds)
-                break  # Send flood — rate limiting, stop trying
-            # Permanent ban: mark account in DB and try next account
-            # (this is an ACCOUNT issue, not a GROUP issue — other accounts should continue)
+                break  # Send flood — stop trying this group
+            # Permanent ban: mark in DB, try next account (account issue, not group issue)
             if tg.is_permanent_ban(e):
                 await db.accounts.update_one(
                     {"id": acc["id"]},
                     {"$set": {"status": "banned", "last_error": str(e)}}
                 )
-                continue  # Try next account — this one is dead but group is fine
-            # Dead group: truly inaccessible — mark for ALL accounts, stop trying
+                continue
+            # Dead group: inaccessible for ALL accounts — stop trying
             if _is_dead_group_error(str(e)):
                 _campaign_dead_groups.setdefault(camp_id, set()).add(grp_id)
                 logger.info(f"Campaign {camp_id}: dead group {grp_id} — skipping in future cycles")
-                break  # No point trying more accounts
-            # Per-account group restriction: ban THIS account from THIS group
-            # Other accounts should still try (via _should_try_next_account)
+                break
+            # Per-account group restriction: ban this account from this group
             if _is_group_ban_error(str(e)):
                 _campaign_bans.setdefault(camp_id, set()).add((acc["id"], grp_id))
                 logger.info(
@@ -739,10 +734,10 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
         finally:
             _active_sends.discard(send_key)
 
-        # Break immediately for group-level or non-rotatable errors.
-        # If _should_try_next_account returns True, continue to next account.
-        if not success and last_err and not _should_try_next_account(last_err):
-            break
+        # ORIGINAL LOGIC: explicitly continue to next account only for known rotatable errors.
+        # For unknown errors: for-loop naturally moves to next account (don't break early).
+        if not success and last_err and _should_try_next_account(last_err):
+            continue
 
     # After exhausting all account tries — if ALL failed with 'no user has',
     # every account in the pool can't resolve this group. Mark dead to stop
