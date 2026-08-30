@@ -83,7 +83,7 @@ async def get_object(path: str) -> tuple[bytes, str]:
     if not _use_cloud():
         src = _local_path(path)
         if not await asyncio.to_thread(src.is_file):
-            raise FileNotFoundError(path)
+            raise FileNotFoundError(f"Media file not found: {path} — re-upload the media in campaign settings")
         data = await asyncio.to_thread(src.read_bytes)
         ext = src.suffix.lstrip(".").lower()
         return data, MIME_TYPES.get(ext, "application/octet-stream")

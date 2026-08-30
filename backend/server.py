@@ -39,6 +39,11 @@ _active_sends: set[tuple[str, str]] = set()
 # campaign. Cleared when campaign stops/restarts. New campaigns start fresh.
 _campaign_bans: dict[str, set[tuple[str, str]]] = {}
 
+# ── Per-campaign dead groups ───────────────────────────────────────────────
+# campaign_id → set of group_ids that are dead (deleted, renamed, etc).
+# Once marked dead, ALL accounts skip this group for the rest of the campaign.
+_campaign_dead_groups: dict[str, set[str]] = {}
+
 mongo_url = os.environ['MONGO_URL']
 # Atlas (mongodb+srv://) needs certifi CA bundle; Railway internal MongoDB does not
 mongo_opts = {"tlsCAFile": certifi.where()} if mongo_url.startswith("mongodb+srv") else {}
@@ -598,11 +603,27 @@ def _is_group_ban_error(err: str) -> bool:
     ))
 
 
+def _is_dead_group_error(err: str) -> bool:
+    """True if the error means the group itself is dead/deleted/renamed.
+    No account can ever send to this group — skip for ALL accounts."""
+    msg = (err or "").lower()
+    return any(p in msg for p in (
+        "no user has",
+        "nobody is using this username",
+        "username is unacceptable",
+        "username invalid",
+    ))
+
+
 async def _send_to_group(campaign, accounts, start_idx, grp):
     """Deliver the ad to one group. Tries accounts in rotation; handles cooldowns and dedup."""
     success, last_err, used, note, last_acc = False, None, None, None, None
     grp_id = grp["id"]
     camp_id = campaign["id"]
+
+    # Skip dead groups — no account can ever send to these
+    if grp_id in _campaign_dead_groups.get(camp_id, set()):
+        return
 
     # Filter: skip accounts in FloodWait cooldown
     ready_accounts = [a for a in accounts if not tg.is_account_in_cooldown(a["id"])]
@@ -654,6 +675,9 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
             raise
         except Exception as e:
             last_err = str(e)
+            # Missing media: campaign-level issue — no account can fix it
+            if isinstance(e, FileNotFoundError):
+                break  # Stop trying — file is missing for ALL accounts
             # FloodWait: record cooldown, do NOT rotate accounts
             if tg._is_flood_error(e):
                 seconds = getattr(e, "seconds", 60)
@@ -667,6 +691,11 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
                 )
             # Per-campaign group ban: account banned/blocked in this group
             # Skip this (account, group) in future cycles of THIS campaign only
+            elif _is_dead_group_error(str(e)):
+                # Group itself is dead — mark for ALL accounts, stop trying
+                _campaign_dead_groups.setdefault(camp_id, set()).add(grp_id)
+                logger.info(f"Campaign {camp_id}: dead group {grp_id} — skipping in future cycles")
+                break  # No point trying more accounts
             elif _is_group_ban_error(str(e)):
                 _campaign_bans.setdefault(camp_id, set()).add((acc["id"], grp_id))
                 logger.info(
@@ -729,9 +758,13 @@ async def campaign_loop(campaign_id: str):
             # Use unified MAX_CONCURRENCY — same cap in create_campaign and here
             conc = max(1, min(MAX_CONCURRENCY, int(campaign.get("concurrency", tg.CONCURRENCY))))
             sem = asyncio.Semaphore(conc)
+            dead_count = len(_campaign_dead_groups.get(campaign_id, set()))
+            ban_count = len(_campaign_bans.get(campaign_id, set()))
+            live_groups = len(groups) - dead_count
             logger.info(
                 f"Campaign {campaign.get('name')} cycle start: "
-                f"{len(groups)} groups, {len(accounts)} accounts, conc={conc}, interval={interval}s"
+                f"{live_groups}/{len(groups)} live groups ({dead_count} dead), "
+                f"{len(accounts)} accounts ({ban_count} group-bans), conc={conc}, interval={interval}s"
             )
 
             async def bounded(i, grp):
@@ -750,9 +783,19 @@ async def campaign_loop(campaign_id: str):
             )
             # Flush batched counters every cycle
             await _flush_counters()
-            # LRU eviction handles memory — no need to disconnect all clients between cycles.
-            await db.campaigns.update_one({"id": campaign_id}, {"$set": {"last_run": now_iso()}})
-            logger.info(f"Campaign {campaign.get('name')} cycle done — sleeping {interval}s")
+            # Persist dead groups + ban stats to campaign doc for frontend visibility
+            dead_grps = _campaign_dead_groups.get(campaign_id, set())
+            ban_pairs = _campaign_bans.get(campaign_id, set())
+            await db.campaigns.update_one({"id": campaign_id}, {"$set": {
+                "last_run": now_iso(),
+                "dead_groups_count": len(dead_grps),
+                "banned_pairs_count": len(ban_pairs),
+                "dead_group_ids": list(dead_grps),
+            }})
+            logger.info(
+                f"Campaign {campaign.get('name')} cycle done — "
+                f"{len(dead_grps)} dead groups, {len(ban_pairs)} account bans — sleeping {interval}s"
+            )
 
             fresh = await db.campaigns.find_one({"id": campaign_id})
             if not fresh or fresh.get("status") != "running":
@@ -767,10 +810,11 @@ async def campaign_loop(campaign_id: str):
         await db.campaigns.update_one({"id": campaign_id},
             {"$set": {"status": "stopped", "last_error": f"Crashed: {e}"}})
     finally:
-        # Clean up per-campaign ban map — new campaign start = fresh slate
+        # Clean up per-campaign maps — new campaign start = fresh slate
         bans = _campaign_bans.pop(campaign_id, set())
-        if bans:
-            logger.info(f"Campaign {campaign_id}: cleared {len(bans)} account-group bans")
+        dead = _campaign_dead_groups.pop(campaign_id, set())
+        if bans or dead:
+            logger.info(f"Campaign {campaign_id}: cleared {len(bans)} account-group bans, {len(dead)} dead groups")
 
 
 async def log_send(campaign, acc, grp, status, error):

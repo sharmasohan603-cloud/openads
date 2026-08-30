@@ -119,7 +119,7 @@ export const CampaignList = ({ campaigns, onRefresh, accountCount = 0, accountGr
               </p>
             )}
 
-            <div className="mt-4 grid grid-cols-4 gap-3 text-center">
+            <div className="mt-4 grid grid-cols-6 gap-3 text-center">
               <div>
                 <p className="text-[10px] font-mono uppercase text-slate-500">Interval</p>
                 <p className="text-sm font-semibold text-slate-200 flex items-center justify-center gap-1"><Clock size={12} />{c.interval_seconds ?? (c.interval_minutes ? c.interval_minutes * 60 : 60)}s</p>
@@ -135,6 +135,14 @@ export const CampaignList = ({ campaigns, onRefresh, accountCount = 0, accountGr
               <div>
                 <p className="text-[10px] font-mono uppercase text-slate-500">Sent</p>
                 <p className="text-sm font-semibold text-indigo-400">{c.sent_count || 0}</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-mono uppercase text-slate-500">Dead</p>
+                <p className="text-sm font-semibold text-red-400">{c.dead_groups_count || 0}</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-mono uppercase text-slate-500">Bans</p>
+                <p className="text-sm font-semibold text-amber-400">{c.banned_pairs_count || 0}</p>
               </div>
             </div>
 
