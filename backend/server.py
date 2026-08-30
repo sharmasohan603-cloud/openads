@@ -610,18 +610,27 @@ def _should_try_next_account(err: str) -> bool:
 
 
 def _is_group_ban_error(err: str) -> bool:
-    """True if the error means this specific account can't access this specific group.
-    NOT a permanent account ban — account is fine for other groups/campaigns.
-    Includes 'no user has': some accounts can't resolve certain groups (geo/restriction)
-    but OTHER accounts in the pool may succeed."""
+    """True if this account is PERMANENTLY banned from posting in this group.
+    These get recorded in campaign_bans — account will never retry this group.
+    Only use for real send-level bans, NOT for username resolution failures."""
+    msg = (err or "").lower()
+    return any(p in msg for p in (
+        "banned from send",
+        "you're banned from sending",
+        "you can't write",
+        "chat_write_forbidden",
+    ))
+
+
+def _is_username_resolve_error(err: str) -> bool:
+    """True if this account can't RESOLVE the group username (geo/restriction).
+    Do NOT ban permanently — just rotate. Other accounts may resolve it fine.
+    Egyptian accounts often can't resolve groups that Indonesian accounts can."""
     msg = (err or "").lower()
     return any(p in msg for p in (
         "no user has",
         "nobody is using this username",
         "username is unacceptable",
-        "banned from send",
-        "you can't write",
-        "chat_write_forbidden",
     ))
 
 
@@ -724,13 +733,17 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
                 _campaign_dead_groups.setdefault(camp_id, set()).add(grp_id)
                 logger.info(f"Campaign {camp_id}: dead group {grp_id} — skipping in future cycles")
                 break
-            # Per-account group restriction: ban this account from this group
+            # Hard send ban: this account is permanently banned from posting in this group.
+            # Record it so we never retry this (account, group) pair again.
             if _is_group_ban_error(str(e)):
                 _campaign_bans.setdefault(camp_id, set()).add((acc["id"], grp_id))
-                logger.info(
-                    f"Campaign {camp_id}: banned {acc.get('name',acc['id'])} "
-                    f"from {grp_id} — will skip in future cycles"
+                logger.debug(
+                    f"Campaign {camp_id}: account {acc.get('name',acc['id'])} "
+                    f"send-banned from {grp_id}"
                 )
+            # Username resolve failure: this account can't see the group (geo/restriction).
+            # Do NOT permanently ban — just rotate. Other accounts will resolve it fine.
+            # (No entry in campaign_bans — the account stays available for other cycles.)
         finally:
             _active_sends.discard(send_key)
 
@@ -739,16 +752,6 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
         if not success and last_err and _should_try_next_account(last_err):
             continue
 
-    # After exhausting all account tries — if ALL failed with 'no user has',
-    # every account in the pool can't resolve this group. Mark dead to stop
-    # wasting MAX_ACCOUNT_TRIES on it every single cycle.
-    if not success and tried >= MAX_ACCOUNT_TRIES and last_err:
-        err_lower = last_err.lower()
-        if "no user has" in err_lower or "nobody is using this username" in err_lower:
-            _campaign_dead_groups.setdefault(camp_id, set()).add(grp_id)
-            logger.info(
-                f"Campaign {camp_id}: group {grp_id} unreachable by all {tried} accounts — marking dead"
-            )
 
     if success:
         await log_send(campaign, used, grp, "success", note)
