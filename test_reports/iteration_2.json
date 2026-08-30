@@ -1,0 +1,19 @@
+{
+  "summary": "Verified the bug fix: campaign Start/Stop is now an explicit Button (data-testid=campaign-toggle-{id}) instead of a Switch. Created throwaway 'QA_START_TEST' campaign targeting only '@qa_nonexistent_grp_zzz999' (so no real group is messaged), exercised Start -> Stop -> Delete end-to-end while the real user campaign was left completely untouched. All 4 network calls returned 200 (POST /api/campaigns, POST /campaigns/{id}/start, POST /campaigns/{id}/stop, DELETE /campaigns/{id}). UI reflected running/stopped states correctly, success toast 'Campaign started — broadcasting now' appeared. Button is plainly clickable — the previous Switch-not-clickable issue is resolved.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/backend_test.py"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "CampaignList.toggle() reads both c.running and c.status==='running' which is defensive and correct, but backend consistency should be verified — pick one canonical field to reduce ambiguity.",
+    "review_request mentions the real user campaign is named 'summary', but the currently seeded live user campaign in the DB is named 'testing' (97 targets, stopped). Not a bug in the fix, just a note for main agent that context drifted."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (frontend-only run)", "frontend": "100%"},
+  "test_credentials": "none — no auth",
+  "seed_data_creation": "Created + deleted transient 'QA_START_TEST' campaign via UI targeting nonexistent handle only. No real groups messaged. Real 'testing' campaign was not touched.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Start/Stop toggle button works. Selectors: campaign-toggle-{id}, campaign-status-{id}, campaign-delete-{id}, campaign-card-{id}, campaign-create-open, campaign-name-input, msgtype-text|media|forward, campaign-text-input, campaign-groups-input, campaign-interval-input, campaign-submit-button, nav-campaigns. When creating test campaigns, always target a nonexistent handle to avoid real Telegram spam — there are 156 REAL accounts in the pool.",
+  "rca of the issue": "Original bug: campaign Start control was rendered as a shadcn Switch which was intercepted/not reliably clickable. Fix: replaced with a real <Button> (Play/Square icon, cyan when stopped, rose when running) at data-testid=campaign-toggle-{id} calling api.startCampaign/stopCampaign. Verified click triggers POST and UI state flips as expected."
+}

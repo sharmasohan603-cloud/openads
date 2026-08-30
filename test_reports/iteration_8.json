@@ -1,0 +1,26 @@
+{
+  "summary": "Tested new features: campaign last_error field + banner and per-target health/remove-groups. 5/5 backend pytest tests pass (new campaigns include last_error=null; /start clears last_error then loop sets 'No accounts available in the selected section.' when the batch is empty; GET /campaigns/{id}/targets-health correctly classifies dead/failing/ok/unknown with proper counts, last_error surfacing, and dead-first ordering; 404 for missing campaign; remove-groups pulls specified groups, returns 400 on empty payload and 404 on unknown campaign). Frontend tested via Playwright: Targets dialog opens, target-row entries render with per-row remove buttons and Remove-all-dead action, Targets count on card decrements after removal, and the red 'Stopped: <last_error>' banner (campaign-last-error-<id>) renders correctly when last_error is set. SAFETY: no real campaign was started against real accounts; the no-accounts test inserted the campaign directly into Mongo with a fake batch_id so the loop hit the empty-section branch and stopped without any Telegram calls. All throwaway campaigns/logs cleaned up. zydex was not touched.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_targets_health_and_last_error.py",
+    "/app/test_reports/pytest/targets_health.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is 775 lines — approaching 700-line guideline; consider splitting campaign/account/proxy modules.",
+    "targets_health aggregation uses $last after $sort by timestamp — correct, but note lexical sort works only because ISO-8601 timestamps are stored as strings; keep the sort stage.",
+    "campaign_loop no-accounts branch writes a synthetic log with account_id=None and group_id='-'; that row will show up under GET /logs and could pollute stats. Consider a separate 'system' status or skipping the log for the placeholder group.",
+    "start_campaign clears last_error before task creation — race is fine because campaign_loop only overwrites on real error. Good."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_targets_health_and_last_error.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "n/a (no auth)",
+  "seed_data_creation": "All throwaway campaigns and seeded logs deleted after each test.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend regression file: /app/backend/tests/test_targets_health_and_last_error.py. Never call /start on a campaign that would touch real accounts — use direct Mongo insertion with a fake batch_id (see test_start_clears_last_error_no_accounts_branch) to exercise the no-accounts branch safely. 256 live accounts + zydex campaign exist in this DB."
+}

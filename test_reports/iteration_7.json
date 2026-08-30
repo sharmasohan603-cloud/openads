@@ -1,0 +1,28 @@
+{
+  "summary": "Validated all 3 reported issues + fixes: (1) repeat-loop broadcast keeps cycling until status=stopped, (2) hanging account no longer stalls the cycle thanks to asyncio.wait_for on both get_client and send_ad_to_group, (3) media->text fallback works when Telegram raises a ChatSendMediaForbiddenError-like RPCError. Also validated the new PUT /api/campaigns/{id} update endpoint (backend + frontend UI). 12/12 pytest tests pass; UI edit flow verified end-to-end via Playwright (prefill, save, toast, card reflects new interval). NO real Telegram calls were made — all mocked via monkeypatch. No real accounts or the 'zydex' campaign were started.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_repeat_loop_and_fallback.py",
+    "/app/backend/tests/test_update_campaign.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:678 uses deprecated @app.on_event; consider migrating to lifespan handlers (non-blocking).",
+    "campaign_loop swallows non-CancelledError exceptions and sets status=stopped without logging traceback details to Mongo; consider persisting last_error field so UI can surface why a campaign died.",
+    "_send_to_group re-uses `note` variable across attempts — the fallback note from a previous failed attempt would leak into a later success log if the successful send returns None; minor cosmetic but currently harmless.",
+    "server.py at 707 lines is above the 700-line soft limit; consider splitting into routers (accounts.py, proxies.py, campaigns.py) for maintainability."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_repeat_loop_and_fallback.py (new)",
+    "/app/backend/tests/test_update_campaign.py (new)"
+  ],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "100% (edit flow)"},
+  "test_credentials": "n/a",
+  "seed_data_creation": "Tests insert fake accounts under batch_id 'qa-batch-repeat' and TEST_* campaigns; all deleted in fixture teardown. Playwright test created TEST_edit_ui_throwaway campaign and deleted it via API.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend tests live at /app/backend/tests/test_repeat_loop_and_fallback.py (mocked loop/fallback) and test_update_campaign.py (PUT /api/campaigns/{id}). The repeat-loop test rebinds motor client per-test via autouse fixture because pytest-asyncio 1.4 creates a fresh loop per test. DO NOT trigger /api/campaigns/{id}/start against any live campaign — 256 real Telegram accounts are loaded and 'zydex' is a real campaign.",
+  "rca of the issue": "Original repeat-not-looping bug: campaign_loop awaited get_client/send_ad_to_group without a timeout — dead accounts caused the gather to never resolve, so the outer while-True never got to sleep+repeat. Fix: server._send_to_group now wraps both calls with asyncio.wait_for(..., timeout=tg.CLIENT_TIMEOUT/SEND_TIMEOUT). Media fallback: telegram_service.send_ad_to_group catches telethon.errors.RPCError and inspects type(e).__name__ for 'FORBIDDEN' + a media keyword (MEDIA/PHOTO/GIF/VIDEO/...) to trigger client.send_message(text) fallback with note 'Media blocked in group — sent text only'."
+}

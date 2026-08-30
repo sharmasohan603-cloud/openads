@@ -1,0 +1,148 @@
+{
+  "project_title": "TelePulse Ad Engine - Telegram Group Campaign Automation Dashboard",
+  "app_type": "dashboard",
+  "archetype": "THE PERFORMANCE PRO / CYBERPUNK TACTICAL",
+  "theme_strategy": {
+    "default_mode": "dark",
+    "theme_toggle_supported": true,
+    "rationale": "Telegram power-users and broadcast automation operators work in continuous monitoring environments where high-density dark dashboards reduce eye fatigue and maximize high-visibility status signals."
+  },
+  "typography": {
+    "font_family_heading": "Outfit, Cabinet Grotesk, sans-serif",
+    "font_family_body": "Inter, system-ui, sans-serif",
+    "font_family_mono": "JetBrains Mono, Fira Code, monospace",
+    "google_fonts_import": "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@500;600;700;800&display=swap",
+    "sizes": {
+      "h1_hero": "text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight",
+      "h2_section": "text-xl sm:text-2xl font-bold tracking-tight",
+      "h3_card": "text-lg font-semibold tracking-tight",
+      "subtitle": "text-sm text-slate-400 font-normal leading-relaxed",
+      "body": "text-sm font-normal text-slate-200 leading-normal",
+      "caption_mono": "text-xs font-mono text-cyan-400 tracking-wider uppercase"
+    }
+  },
+  "colors": {
+    "background_main": "#0B0F19",
+    "background_card": "#111827",
+    "background_card_hover": "#1F2937",
+    "background_sidebar": "#090D16",
+    "border_subtle": "rgba(255, 255, 255, 0.08)",
+    "border_active": "rgba(0, 136, 204, 0.4)",
+    "primary_telegram_blue": "#0088CC",
+    "primary_cyan_bright": "#24A1DE",
+    "accent_emerald_success": "#10B981",
+    "accent_amber_warning": "#F59E0B",
+    "accent_rose_danger": "#EF4444",
+    "accent_indigo_violet": "#6366F1",
+    "text_primary": "#F9FAFB",
+    "text_secondary": "#9CA3AF",
+    "text_muted": "#6B7280",
+    "gradient_accent": "linear-gradient(135deg, #0088CC 0%, #24A1DE 50%, #6366F1 100%)",
+    "glow_cyan": "0 0 20px rgba(36, 161, 222, 0.25)",
+    "glow_emerald": "0 0 15px rgba(16, 185, 129, 0.25)"
+  },
+  "visual_enhancers": {
+    "glassmorphism": "backdrop-blur-xl bg-slate-900/80 border border-slate-800/80 shadow-2xl",
+    "telemetry_card": "bg-slate-900/90 rounded-xl border border-slate-800 p-5 transition-all duration-200 hover:border-cyan-500/30 hover:shadow-[0_0_20px_rgba(36,161,222,0.15)]",
+    "live_pulse": "relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse",
+    "table_style": "w-full text-left text-sm text-slate-300 border-separate border-spacing-0",
+    "status_badge_connected": "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20",
+    "status_badge_disconnected": "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20",
+    "status_badge_running": "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-cyan-500/10 text-cyan-400 border border-cyan-500/20",
+    "status_badge_paused": "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20"
+  },
+  "layout_and_grids": {
+    "app_shell": "flex h-screen w-full bg-[#0B0F19] text-slate-100 overflow-hidden font-sans",
+    "sidebar": "w-64 flex-shrink-0 bg-[#090D16] border-r border-slate-800/80 p-4 flex flex-col justify-between hidden md:flex",
+    "main_content": "flex-1 flex flex-col min-w-0 overflow-y-auto p-4 md:p-8 space-y-8",
+    "stats_overview_grid": "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6",
+    "bento_dashboard_grid": "grid grid-cols-1 lg:grid-cols-12 gap-6",
+    "two_panel_workspace": "grid grid-cols-1 lg:grid-cols-12 gap-6 items-start"
+  },
+  "component_architecture": {
+    "file_structure_convention": "JavaScript (.js and .jsx files) using React 19, Lucide React icons, Sonner toasts, and Recharts.",
+    "key_components": [
+      {
+        "name": "HeaderNav",
+        "description": "Top sticky navigation bar with platform logo, connected account counter, dark/light toggle, quick session test trigger, and live system status.",
+        "testid": "header-navigation"
+      },
+      {
+        "name": "StatsOverviewCards",
+        "description": "4 key metric cards displaying Total Accounts, Active Campaigns, Total Messages Sent, and Delivery Success Rate with trend badges and Sparkline mini visuals.",
+        "testid": "stats-overview-cards"
+      },
+      {
+        "name": "AccountsManager",
+        "description": "Telethon String Session management modal and card list. Form inputs for Account Name, API ID, API Hash, Telethon Session String with instant 'Validate Session' and connection test capabilities.",
+        "testid": "accounts-manager-section"
+      },
+      {
+        "name": "TargetDialogSelectorModal",
+        "description": "Dialog list modal with search, category filters (Groups, Supergroups, Channels), multi-select checkboxes, subscriber counts, and Telethon access verification status.",
+        "testid": "target-dialog-selector-modal"
+      },
+      {
+        "name": "CampaignCreatorWizard",
+        "description": "Multi-step or rich unified builder supporting: Message Mode (Text, Text + Image/Media URL, Forward Post), Live Message Preview box, Target Group Selection list, and Repeat Interval Scheduler (minutes/hours).",
+        "testid": "campaign-creator-wizard"
+      },
+      {
+        "name": "CampaignDashboardList",
+        "description": "Interactive list of created campaigns with Start/Stop toggle switches, detailed execution progress bar, target group tags, repeat interval indicator, and next scheduled run countdown.",
+        "testid": "campaign-dashboard-list"
+      },
+      {
+        "name": "ActivityLogsTable",
+        "description": "Filterable real-time activity execution log table with search, status filters (Success, Failed, Pending), Telethon account tag, target group link, timestamp, and detailed response error details.",
+        "testid": "activity-logs-table"
+      },
+      {
+        "name": "SessionTesterWidget",
+        "description": "Interactive playground tool allowing users to test Telethon string session connections or send a test ping message directly to a personal group or test chat.",
+        "testid": "session-tester-widget"
+      }
+    ]
+  },
+  "motion": {
+    "library": "framer-motion",
+    "card_entrance": {
+      "initial": { "opacity": 0, "y": 12 },
+      "animate": { "opacity": 1, "y": 0 },
+      "transition": { "duration": 0.3, "ease": "easeOut" }
+    },
+    "stagger_container": {
+      "animate": { "transition": { "staggerChildren": 0.08 } }
+    },
+    "interactive_hover": "transition-transform duration-200 hover:-translate-y-0.5 active:translate-y-0"
+  },
+  "media": {
+    "image_urls": {
+      "telegram_logo_neon": "https://images.unsplash.com/photo-1678993437662-d6acc3bf4d5d?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NjZ8MHwxfHNlYXJjaHwzfHx0ZWxlZ3JhbSUyMG1lc3NhZ2luZyUyMHRlY2hub2xvZ3klMjBncmlkJTIwZGFyayUyMG5lb24lMjBkYXNoYm9hcmR8ZW58MHx8fHwxNzg2OTM0MzIyfDA&ixlib=rb-4.1.0&q=85",
+      "telegram_app_dark": "https://images.unsplash.com/photo-1751459422184-e0554bb8db0b?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NjZ8MHwxfHNlYXJjaHwyfHx0ZWxlZ3JhbSUyMG1lc3NhZ2luZyUyMHRlY2hub2xvZ3klMjBncmlkJTIwZGFyayUyMG5lb24lMjBkYXNoYm9hcmR8ZW58MHx8fHwxNzg2OTM0MzIyfDA&ixlib=rb-4.1.0&q=85",
+      "telegram_blue_paperplane": "https://images.unsplash.com/photo-1636743094110-5e153f93ad7e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NjZ8MHwxfHNlYXJjaHwxfHx0ZWxlZ3JhbSUyMG1lc3NhZ2luZyUyMHRlY2hub2xvZ3klMjBncmlkJTIwZGFyayUyMG5lb24lMjBkYXNoYm9hcmR8ZW58MHx8fHwxNzg2OTM0MzIyfDA&ixlib=rb-4.1.0&q=85"
+    }
+  },
+  "testing_attributes_convention": {
+    "mandatory_rule": "All interactive elements, input fields, filter tabs, table rows, and status indicators MUST include explicit role-based kebab-case data-testid attributes.",
+    "examples": [
+      "data-testid='account-add-button'",
+      "data-testid='session-string-input'",
+      "data-testid='account-status-badge-1'",
+      "data-testid='group-checkbox-102'",
+      "data-testid='campaign-start-toggle-2'",
+      "data-testid='campaign-submit-button'",
+      "data-testid='log-filter-success'",
+      "data-testid='stats-card-total-sent'"
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Use standard JavaScript (.js / .jsx) components matching existing project setup.",
+    "Construct a dark tactical dashboard using deep obsidian background (#0B0F19) and subtle slate glass card layers (#111827).",
+    "Ensure all 7 key user functionalities are fully interactive and connected to mock or live backend state: Telethon Account Management, Group Fetching & Selector, Ad Campaign Builder with live message preview, Campaign Dashboard with start/stop toggles & countdowns, Send Logs table with real-time log filter, Stats Cards, and Telethon session verification test tool.",
+    "Implement Sonner toasts for instant feedback on account validation, campaign toggles, and message dispatching.",
+    "Never use generic centered layouts or unstyled default HTML select boxes; use Shadcn components or custom dark styled dropdowns.",
+    "Strictly follow data-testid conventions for all buttons, inputs, tabs, and status cards."
+  ],
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": "Avoid generic AI slop. Create depth through layered design elements with z-index hierarchy, glassmorphic strokes (border-slate-800/80), live pulse status indicators, custom scrollbars, and high-visibility stats hierarchy. Always add transitions for specific interactive elements."
+}

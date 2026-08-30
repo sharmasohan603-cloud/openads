@@ -1,0 +1,23 @@
+{
+  "summary": "Tested new per-campaign concurrency feature end-to-end. Backend: 14 pytest cases all pass (default 25, clamp 999->100, 0->1, -5->1, 50 stored, persistence via GET, message_type variants, interval preserved, empty target_groups -> 400, invalid batch -> 400, account-groups still returns 'accounts' section with count 156, new campaigns default to 'stopped'). Frontend: new-campaign modal exposes campaign-concurrency-slider with live concurrency-value defaulting to 25; keyboard-driven change updates value; created campaign persists chosen value (35x) and card shows 4-column metric row Interval/Speed/Targets/Sent. Media->text fallback verified via code review only (per safety note, no /start calls). ActivityLogs.jsx detail column uses conditional class: failed => text-rose-400/80 (red), success/other => text-amber-400/80 (amber) — verified by code inspection. All test campaigns created were deleted. 'testing' campaign, accounts, and logs untouched.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_campaigns_concurrency.py",
+    "/app/test_reports/pytest/pytest_concurrency.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:329 uses tg.CONCURRENCY as fallback default for stored campaign — safe due to clamp, but campaigns created via POST always set concurrency so fallback rarely used; OK.",
+    "telegram_service.send_ad_to_group media-fallback correctly requires `text` truthy before falling back; when caption is empty the RPCError is re-raised — good.",
+    "_send_to_group logs 'accounts[0]' as the account on total failure, which may misattribute the failed log to an account that wasn't the last one tried. Minor observability issue."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (14/14)", "frontend": "100% for tested flows"},
+  "test_credentials": "n/a (no auth)",
+  "seed_data_creation": "Created and deleted temporary TEST_* campaigns targeting @qa_nonexistent_grp_zzz999 only. None started. Confirmed deletion via API.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Set REACT_APP_BACKEND_URL env before running pytest (BASE_URL is read at import). Media->text-only fallback and 20-account retry cap were NOT executed live (safety: real accounts). If needing to validate them, mock telegram_service.send_ad_to_group to raise RPCError('CHAT_SEND_MEDIA_FORBIDDEN') and inspect log 'note' field. 'testing' campaign was in 'stopped' state during this iteration.",
+  "rca of the issue": "n/a — no bugs found"
+}

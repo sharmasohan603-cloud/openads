@@ -1,0 +1,26 @@
+{
+  "summary": "Verified account sections + parallel-broadcast wiring end-to-end. Backend: 6/6 pytest cases pass (GET /api/account-groups returns list; sums to 156 accounts; found 'accounts' section with count=156, batch_id=cb6c76c2-8760-5f1a-b46d-106fe1b19bee; POST /api/campaigns with valid account_batch_id persists id+name; POST without batch defaults to null; invalid batch -> 400; empty target_groups -> 400; interval_seconds stored). Frontend: Campaign create modal shows account-pool-banner explaining parallel sending, interval label reads 'Repeat Cycle Every (seconds)', batch-select dropdown lists 'All accounts (156)' + 'accounts (156)'. Created a QA campaign scoped to '@qa_nonexistent_grp_zzz999' with the 'accounts' section selected — POST returned 200 with account_batch_id/account_batch_name populated, card shows section name 'accounts' beneath the campaign title. Campaign was DELETED after verification. Real 'testing' campaign (id 61e14928…) was NOT touched. No /start calls were made. AccountsManager label 'Section / Group Name' confirmed present.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_account_sections.py",
+    "/app/test_reports/pytest/section_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py account_groups() filters rows where batch_id is truthy, so 'Ungrouped' rows (batch_name fallback) never surface — the fallback string is effectively dead code because startup migration always assigns a batch_id.",
+    "The old /app/backend/tests/backend_test.py still references the pre-refactor campaign schema (account_id, interval_minutes, target_groups list of dicts) and will fail if executed. Consider deleting or refactoring; new tests live in test_account_sections.py.",
+    "CampaignCreator label reads 'Account Section (which upload sends this)' — grammar is slightly awkward; consider 'Account Section (which upload should send this)'. Non-blocking.",
+    "campaign_loop reads interval_seconds each iteration but doesn't react promptly to a status change during a long asyncio.gather — status is only re-checked between cycles, which is acceptable but worth documenting."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_account_sections.py"
+  ],
+  "success_rate": {"backend": "100% (6/6)", "frontend": "100%"},
+  "test_credentials": "none — no auth",
+  "seed_data_creation": "Created transient campaign 'TEST_QA_section_flow' via UI targeting only '@qa_nonexistent_grp_zzz999', verified section assignment, then deleted via DELETE /api/campaigns/{id}. Backend pytest also creates+deletes TEST_ campaigns targeting the same nonexistent handle. No /start calls issued. Real 'testing' campaign left intact.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Section feature works. Key selectors: campaign-batch-select, batch-opt-all, batch-opt-{batch_id}, account-pool-banner. Backend fields on campaign: account_batch_id, account_batch_name. NEVER call /api/campaigns/{id}/start — 156 real Telegram accounts are live. Always target only @qa_nonexistent_grp_zzz999 and delete after. Note: hitting the DELETE endpoint via Python urllib may return 403 from the preview edge; use curl or requests instead.",
+  "rca of the issue": "Not a bug fix — feature verification. Parallel broadcasting (asyncio.gather with semaphore CONCURRENCY=25 in telegram_service.py) and per-campaign account sectioning (batch_id column on accounts, backfilled via uuid5 at startup) are correctly wired frontend->backend->DB. account-groups endpoint returns proper aggregation and campaign create validates batch existence."
+}

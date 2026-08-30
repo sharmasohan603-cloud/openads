@@ -1,0 +1,32 @@
+# ── Secrets & local data — NEVER commit these ─────────────────────
+backend/.env
+backend/.env.*
+*.env
+
+# ── Local MongoDB ─────────────────────────────────────────────────
+mongo-data/
+mongo-bin/
+*.log
+
+# ── Uploaded media ────────────────────────────────────────────────
+uploads/
+
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# ── Node ──────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/build/
+frontend/.env
+frontend/.env.*
+
+# ── OS cruft ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
