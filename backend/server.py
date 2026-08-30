@@ -622,19 +622,18 @@ def _is_group_ban_error(err: str) -> bool:
         "banned from send",
         "you can't write",
         "chat_write_forbidden",
-        "chat admin privileges",
     ))
 
 
 def _is_dead_group_error(err: str) -> bool:
-    """True ONLY if the group is truly deleted/deactivated — no account can ever reach it.
+    """True ONLY if the group is truly inaccessible for ALL accounts.
 
-    IMPORTANT: 'no user has X' is NOT dead — it's per-account. Some accounts can resolve
-    these groups, others can't. We rotate accounts and ban the failing one from this group.
-    Only mark dead for Telegram's explicit 'group deleted' errors.
+    'chat admin privileges': broadcast channel — only admins can post, no account can fix it.
+    Peer/channel invalid: group deleted/deactivated.
     """
     msg = (err or "").lower()
     return any(p in msg for p in (
+        "chat admin privileges",
         "peer_id_invalid",
         "channel_invalid",
         "chat_id_invalid",
@@ -705,11 +704,17 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
             # Missing media: campaign-level issue — no account can fix it
             if isinstance(e, FileNotFoundError):
                 break  # Stop trying — file is missing for ALL accounts
-            # FloodWait: record cooldown, do NOT rotate accounts
+            # FloodWait:
+            # - On JoinChannelRequest: only the JOIN is rate-limited for this account.
+            #   The next account may not be rate-limited — try it.
+            # - On SendMessageRequest: true account-level flood, record cooldown and stop.
             if tg._is_flood_error(e):
+                if "joinchannelrequest" in last_err.lower():
+                    # Join flood — skip this account, try next (don't set global cooldown)
+                    continue
                 seconds = getattr(e, "seconds", 60)
                 tg.set_account_cooldown(acc["id"], seconds)
-                break  # Stop trying accounts — it's rate limiting, not a bad account
+                break  # Send flood — rate limiting, stop trying
             # Permanent ban: mark account in DB and try next account
             # (this is an ACCOUNT issue, not a GROUP issue — other accounts should continue)
             if tg.is_permanent_ban(e):
@@ -718,7 +723,7 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
                     {"$set": {"status": "banned", "last_error": str(e)}}
                 )
                 continue  # Try next account — this one is dead but group is fine
-            # Dead group: truly deleted/deactivated — mark for ALL accounts, stop trying
+            # Dead group: truly inaccessible — mark for ALL accounts, stop trying
             if _is_dead_group_error(str(e)):
                 _campaign_dead_groups.setdefault(camp_id, set()).add(grp_id)
                 logger.info(f"Campaign {camp_id}: dead group {grp_id} — skipping in future cycles")
@@ -738,6 +743,17 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
         # If _should_try_next_account returns True, continue to next account.
         if not success and last_err and not _should_try_next_account(last_err):
             break
+
+    # After exhausting all account tries — if ALL failed with 'no user has',
+    # every account in the pool can't resolve this group. Mark dead to stop
+    # wasting MAX_ACCOUNT_TRIES on it every single cycle.
+    if not success and tried >= MAX_ACCOUNT_TRIES and last_err:
+        err_lower = last_err.lower()
+        if "no user has" in err_lower or "nobody is using this username" in err_lower:
+            _campaign_dead_groups.setdefault(camp_id, set()).add(grp_id)
+            logger.info(
+                f"Campaign {camp_id}: group {grp_id} unreachable by all {tried} accounts — marking dead"
+            )
 
     if success:
         await log_send(campaign, used, grp, "success", note)
