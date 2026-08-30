@@ -576,6 +576,7 @@ def _should_try_next_account(err: str) -> bool:
 
     FloodWait: handled by cooldown — do NOT rotate (caller records cooldown and skips).
     Media restrictions: group-level — text fallback in telegram_service handles it.
+    Note: "no user has" is NOT here — that was a join error, handled by _proactive_join now.
     """
     if _is_media_error_string(err):
         return False
@@ -584,10 +585,12 @@ def _should_try_next_account(err: str) -> bool:
 
     msg = (err or "").lower()
     return any(p in msg for p in (
-        "banned from send", "nobody is using this username",
-        "no user has", "username invalid",
-        "auth key", "you can't write",
-        "chat_write_forbidden", "invalid peer", "not a member",
+        "banned from send",
+        "auth key",
+        "you can't write",
+        "chat_write_forbidden",
+        "invalid peer",
+        "not a member",
     ))
 
 
@@ -604,16 +607,20 @@ def _is_group_ban_error(err: str) -> bool:
 
 
 def _is_dead_group_error(err: str) -> bool:
-    """True if the error means the group itself is dead/deleted/renamed.
-    No account can ever send to this group — skip for ALL accounts."""
+    """True if the error means the group itself is deleted/inaccessible for ALL accounts.
+    
+    IMPORTANT: "no user has X as username" is NOT a dead group — it means the account
+    wasn't a member and couldn't resolve it. After joining, it will work fine.
+    Only mark dead when Telegram explicitly says the group/channel doesn't exist.
+    """
     msg = (err or "").lower()
     return any(p in msg for p in (
-        "no user has",
-        "nobody is using this username",
-        "username is unacceptable",
-        "username invalid",
+        "peer_id_invalid",
+        "channel_invalid",
+        "chat_id_invalid",
+        "the group has been deactivated",
+        "groupdeactivated",
     ))
-
 
 async def _send_to_group(campaign, accounts, start_idx, grp):
     """Deliver the ad to one group. Tries accounts in rotation; handles cooldowns and dedup."""
