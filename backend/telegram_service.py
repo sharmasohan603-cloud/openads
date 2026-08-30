@@ -511,12 +511,28 @@ async def _try_join(client: TelegramClient, account_id: str, group_id: str, enti
 
 
 async def _resolve_entity(client: TelegramClient, group_id: str):
-    """Resolve a group entity without joining (avoids join flood on every send)."""
+    """Resolve a group entity. If first attempt fails with username error,
+    warm the entity cache via get_dialogs() and retry — handles cold sessions
+    (e.g., after Railway restart where StringSession has no entity cache).
+    """
     parsed = _parse_group_identifier(group_id)
     if parsed["kind"] == "invite":
         return await client.get_entity(parsed["raw"])
     target = parsed.get("username") or parsed.get("id") or parsed["raw"]
-    return await client.get_entity(target)
+
+    try:
+        return await client.get_entity(target)
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "no user has" in err_msg or "nobody is using" in err_msg:
+            # Entity not in session cache — warm it by fetching dialogs
+            logger.debug(f"Entity cache miss for {group_id}, warming via get_dialogs()")
+            try:
+                await client.get_dialogs(limit=100)
+                return await client.get_entity(target)
+            except Exception:
+                pass  # Re-raise the original error
+        raise
 
 
 def _needs_join(exc: Exception) -> bool:
@@ -657,15 +673,15 @@ async def _send_with_entity(client: TelegramClient, entity, mtype: str, campaign
     raise ValueError(f"Unknown message type: {mtype}")
 
 
-async def _proactive_join(client: TelegramClient, account_id: str, group_id: str) -> str | None:
-    """Join the group BEFORE resolving entity.
+async def _proactive_join(client: TelegramClient, account_id: str, group_id: str):
+    """Join the group BEFORE resolving entity. Returns (join_note, entity_or_None).
 
-    CRITICAL: Do NOT call client.get_entity(username) here — Telegram returns
-    'No user has X as username' for groups you're not a member of.
+    CRITICAL: Do NOT swallow 'no user has X' errors — those mean THIS account
+    cannot resolve the group. By re-raising, server.py will rotate to the next
+    account which may succeed.
 
-    Instead, pass the username string directly to JoinChannelRequest.
-    Telethon resolves it internally via ResolveUsernameRequest which works
-    without membership. Only AFTER joining can you safely call get_entity.
+    Returns the entity from the join response when available, avoiding a
+    redundant resolve call that would fail the same way.
     """
     parsed = _parse_group_identifier(group_id)
     cache_key = (account_id, _group_cache_key(group_id))
@@ -673,65 +689,89 @@ async def _proactive_join(client: TelegramClient, account_id: str, group_id: str
 
     async with lock:
         if _join_key_is_fresh(cache_key):
-            return None  # already joined this session
-        _mark_join_attempted(cache_key)
+            return None, None  # already joined this session
 
         # ── Invite link ───────────────────────────────────────────────────────
         if parsed["kind"] == "invite":
             try:
-                await client(ImportChatInviteRequest(parsed["invite_hash"]))
-                return "Joined via invite link"
+                updates = await client(ImportChatInviteRequest(parsed["invite_hash"]))
+                _mark_join_attempted(cache_key)
+                # Extract entity from the updates response
+                entity = None
+                if hasattr(updates, 'chats') and updates.chats:
+                    entity = updates.chats[0]
+                return "Joined via invite link", entity
             except errors.UserAlreadyParticipantError:
-                return None
+                _mark_join_attempted(cache_key)
+                return None, None
             except errors.InviteRequestSentError:
-                return "Join request sent"
+                _mark_join_attempted(cache_key)
+                return "Join request sent", None
             except errors.FloodWaitError:
-                return None
+                raise  # Let caller handle flood
             except Exception as e:
                 logger.debug(f"Invite join failed for {group_id}: {e}")
-                return None
+                return None, None
 
         # ── Username (e.g. @forex_temes or https://t.me/voipiran_channel) ─────
         if parsed["kind"] == "username":
             username = parsed["username"]  # already has @ prefix
             try:
-                # Pass the raw username string — Telethon resolves it via
-                # ResolveUsernameRequest (works for non-members, unlike get_entity)
-                await client(JoinChannelRequest(username))
+                updates = await client(JoinChannelRequest(username))
+                _mark_join_attempted(cache_key)
+                # Extract entity from the join response
+                entity = None
+                if hasattr(updates, 'chats') and updates.chats:
+                    entity = updates.chats[0]
                 # After joining, try to also join linked discussion group
-                try:
-                    entity = await client.get_entity(username)
-                    if isinstance(entity, Channel):
+                if entity and isinstance(entity, Channel):
+                    try:
                         await _join_discussion_group(client, entity)
-                except Exception:
-                    pass
-                return "Joined group"
+                    except Exception:
+                        pass
+                return "Joined group", entity
             except errors.UserAlreadyParticipantError:
-                return None
+                _mark_join_attempted(cache_key)
+                return None, None
             except errors.InviteRequestSentError:
-                return "Join request sent"
+                _mark_join_attempted(cache_key)
+                return "Join request sent", None
             except errors.FloodWaitError:
-                return None
+                raise  # Let caller handle flood
             except Exception as e:
+                err_msg = str(e).lower()
+                # RE-RAISE username resolution errors — this account can't access this group
+                # Server.py will rotate to the next account which may succeed
+                if "no user has" in err_msg or "nobody is using this username" in err_msg or "username is unacceptable" in err_msg:
+                    logger.info(f"Account {account_id} can't resolve {group_id}: {e}")
+                    raise  # Don't swallow — let account rotation handle it
                 logger.debug(f"Username join failed for {group_id}: {e}")
-                return None
+                _mark_join_attempted(cache_key)
+                return None, None
 
         # ── Numeric ID ────────────────────────────────────────────────────────
         if parsed["kind"] == "numeric":
             try:
-                await client(JoinChannelRequest(parsed["id"]))
-                return "Joined group"
+                updates = await client(JoinChannelRequest(parsed["id"]))
+                _mark_join_attempted(cache_key)
+                entity = None
+                if hasattr(updates, 'chats') and updates.chats:
+                    entity = updates.chats[0]
+                return "Joined group", entity
             except errors.UserAlreadyParticipantError:
-                return None
+                _mark_join_attempted(cache_key)
+                return None, None
             except errors.InviteRequestSentError:
-                return "Join request sent"
+                _mark_join_attempted(cache_key)
+                return "Join request sent", None
             except errors.FloodWaitError:
-                return None
+                raise  # Let caller handle flood
             except Exception as e:
                 logger.debug(f"Numeric join failed for {group_id}: {e}")
-                return None
+                _mark_join_attempted(cache_key)
+                return None, None
 
-    return None
+    return None, None
 
 
 async def send_ad_to_group(
@@ -741,12 +781,13 @@ async def send_ad_to_group(
     account_id: str = None,
     apply_jitter: bool = True,
 ):
-    """Send the ad. Proactively joins the group FIRST, then resolves entity and sends.
+    """Send the ad. Proactively joins the group FIRST, then sends.
 
-    This is the correct order: Telegram won't let you resolve a group entity by username
-    if the account is not a member — you get 'No user has X as username'.
+    _proactive_join returns (join_note, entity_or_None).
+    If the join succeeded, we use the entity directly — no redundant resolve.
+    If the join was skipped (already joined), we resolve via get_entity.
 
-    apply_jitter: add random 2-5s delay before sending — reduces spam-flag risk.
+    Re-raises 'no user has' errors for account rotation in server.py.
     Re-raises FloodWaitError for caller to handle cooldown.
     """
     if apply_jitter:
@@ -756,10 +797,11 @@ async def send_ad_to_group(
     text = campaign.get("text") or ""
 
     # ── Step 1: Proactively join BEFORE resolving entity ──────────────────────
-    join_note = await _proactive_join(client, account_id, group_id)
+    join_note, entity = await _proactive_join(client, account_id, group_id)
 
-    # ── Step 2: Resolve entity (now we're a member so it will work) ───────────
-    entity = await _resolve_entity(client, group_id)
+    # ── Step 2: Resolve entity ONLY if join didn't return one ─────────────────
+    if entity is None:
+        entity = await _resolve_entity(client, group_id)
 
     # ── Step 3: Send, with one retry if membership check missed ───────────────
     for attempt in range(2):

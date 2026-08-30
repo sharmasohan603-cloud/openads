@@ -584,7 +584,7 @@ def _should_try_next_account(err: str) -> bool:
 
     FloodWait: handled by cooldown — do NOT rotate (caller records cooldown and skips).
     Media restrictions: group-level — text fallback in telegram_service handles it.
-    Note: "no user has" is NOT here — that was a join error, handled by _proactive_join now.
+    'no user has' / 'nobody is using': per-account restriction — other accounts may succeed.
     """
     if _is_media_error_string(err):
         return False
@@ -593,20 +593,32 @@ def _should_try_next_account(err: str) -> bool:
 
     msg = (err or "").lower()
     return any(p in msg for p in (
+        "no user has",
+        "nobody is using this username",
+        "username is unacceptable",
         "banned from send",
         "auth key",
         "you can't write",
         "chat_write_forbidden",
         "invalid peer",
         "not a member",
+        "session is not authorized",
+        "deactivated",
+        "session expired",
+        "session revoked",
     ))
 
 
 def _is_group_ban_error(err: str) -> bool:
-    """True if the error means this specific account is banned/blocked in this specific group.
-    NOT a permanent account ban — account is fine for other groups/campaigns."""
+    """True if the error means this specific account can't access this specific group.
+    NOT a permanent account ban — account is fine for other groups/campaigns.
+    Includes 'no user has': some accounts can't resolve certain groups (geo/restriction)
+    but OTHER accounts in the pool may succeed."""
     msg = (err or "").lower()
     return any(p in msg for p in (
+        "no user has",
+        "nobody is using this username",
+        "username is unacceptable",
         "banned from send",
         "you can't write",
         "chat_write_forbidden",
@@ -615,19 +627,14 @@ def _is_group_ban_error(err: str) -> bool:
 
 
 def _is_dead_group_error(err: str) -> bool:
-    """True if the group is inaccessible for ALL accounts — stop trying, skip in future cycles.
+    """True ONLY if the group is truly deleted/deactivated — no account can ever reach it.
 
-    Includes "no user has X as username": after _proactive_join attempts JoinChannelRequest
-    AND _resolve_entity both fail with this error, the group cannot be reached by any account
-    in this pool (geo-restriction, username changed, or actually deleted).
-    Marking dead saves wasting 12 account retries per cycle on an unreachable group.
+    IMPORTANT: 'no user has X' is NOT dead — it's per-account. Some accounts can resolve
+    these groups, others can't. We rotate accounts and ban the failing one from this group.
+    Only mark dead for Telegram's explicit 'group deleted' errors.
     """
     msg = (err or "").lower()
     return any(p in msg for p in (
-        "no user has",
-        "nobody is using this username",
-        "username invalid",
-        "username is unacceptable",
         "peer_id_invalid",
         "channel_invalid",
         "chat_id_invalid",
@@ -703,20 +710,22 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
                 seconds = getattr(e, "seconds", 60)
                 tg.set_account_cooldown(acc["id"], seconds)
                 break  # Stop trying accounts — it's rate limiting, not a bad account
-            # Permanent ban: mark in DB
+            # Permanent ban: mark account in DB and try next account
+            # (this is an ACCOUNT issue, not a GROUP issue — other accounts should continue)
             if tg.is_permanent_ban(e):
                 await db.accounts.update_one(
                     {"id": acc["id"]},
                     {"$set": {"status": "banned", "last_error": str(e)}}
                 )
-            # Per-campaign group ban: account banned/blocked in this group
-            # Skip this (account, group) in future cycles of THIS campaign only
-            elif _is_dead_group_error(str(e)):
-                # Group itself is dead — mark for ALL accounts, stop trying
+                continue  # Try next account — this one is dead but group is fine
+            # Dead group: truly deleted/deactivated — mark for ALL accounts, stop trying
+            if _is_dead_group_error(str(e)):
                 _campaign_dead_groups.setdefault(camp_id, set()).add(grp_id)
                 logger.info(f"Campaign {camp_id}: dead group {grp_id} — skipping in future cycles")
                 break  # No point trying more accounts
-            elif _is_group_ban_error(str(e)):
+            # Per-account group restriction: ban THIS account from THIS group
+            # Other accounts should still try (via _should_try_next_account)
+            if _is_group_ban_error(str(e)):
                 _campaign_bans.setdefault(camp_id, set()).add((acc["id"], grp_id))
                 logger.info(
                     f"Campaign {camp_id}: banned {acc.get('name',acc['id'])} "
@@ -726,8 +735,7 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
             _active_sends.discard(send_key)
 
         # Break immediately for group-level or non-rotatable errors.
-        # NOTE: in a for loop, `continue` alone is redundant (loop continues anyway).
-        # We need an explicit `break` to stop early.
+        # If _should_try_next_account returns True, continue to next account.
         if not success and last_err and not _should_try_next_account(last_err):
             break
 
@@ -736,8 +744,8 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
         _counter_add(camp_id, "sent")
     else:
         detail = f"All {tried} accounts failed"
-        if n > tries:
-            detail = f"{detail} (tried {tries}/{n})"
+        if n > tried:
+            detail = f"{detail} (tried {tried}/{n})"
         if last_err:
             detail = f"{detail} — last error: {last_err}"
         await log_send(campaign, last_acc, grp, "failed", detail)
