@@ -44,6 +44,16 @@ _campaign_bans: dict[str, set[tuple[str, str]]] = {}
 # Once marked dead, ALL accounts skip this group for the rest of the campaign.
 _campaign_dead_groups: dict[str, set[str]] = {}
 
+# ── Per-campaign account resolve failures ──────────────────────────────────
+# campaign_id → {account_id: consecutive_resolve_fail_count}
+# Tracks how many times IN A ROW an account fails with "no user has" across
+# DIFFERENT groups. After RESOLVE_FAIL_THRESHOLD consecutive failures, the
+# account is auto-excluded from the campaign (it's likely Telegram-restricted).
+# Resets to 0 on any successful send. Per-campaign, so the same account
+# can still work in other campaigns.
+_account_resolve_failures: dict[str, dict[str, int]] = {}
+RESOLVE_FAIL_THRESHOLD = 5  # 5 consecutive "no user has" → auto-exclude
+
 mongo_url = os.environ['MONGO_URL']
 # Atlas (mongodb+srv://) needs certifi CA bundle; Railway internal MongoDB does not
 mongo_opts = {"tlsCAFile": certifi.where()} if mongo_url.startswith("mongodb+srv") else {}
@@ -673,9 +683,16 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
         # All accounts have been banned in this group — skip silently
         return
 
+    # Filter: skip accounts that are restricted (too many consecutive resolve failures)
+    resolve_fails = _account_resolve_failures.get(camp_id, {})
+    unrestricted = [a for a in unbanned_accounts if resolve_fails.get(a["id"], 0) < RESOLVE_FAIL_THRESHOLD]
+    if not unrestricted:
+        # All accounts are restricted — try unrestricted ones anyway (maybe group changed)
+        unrestricted = unbanned_accounts
+
     # Filter: cross-campaign dedup — skip (account, group) pairs already being sent
-    dedup_accounts = [a for a in unbanned_accounts if (a["id"], grp_id) not in _active_sends]
-    effective_accounts = dedup_accounts if dedup_accounts else unbanned_accounts
+    dedup_accounts = [a for a in unrestricted if (a["id"], grp_id) not in _active_sends]
+    effective_accounts = dedup_accounts if dedup_accounts else unrestricted
 
     n = len(effective_accounts)
     if n == 0:
@@ -698,6 +715,8 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
                 timeout=tg.SEND_TIMEOUT + 5,  # +5 for jitter budget
             )
             used, success = acc, True
+            # Success! Reset this account's resolve failure counter
+            _account_resolve_failures.setdefault(camp_id, {})[acc["id"]] = 0
             if tried > 1:
                 extra = f"Delivered after {tried} account tries"
                 note = f"{note} · {extra}" if note else extra
@@ -741,9 +760,17 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
                     f"Campaign {camp_id}: account {acc.get('name',acc['id'])} "
                     f"send-banned from {grp_id}"
                 )
-            # Username resolve failure: this account can't see the group (geo/restriction).
-            # Do NOT permanently ban — just rotate. Other accounts will resolve it fine.
-            # (No entry in campaign_bans — the account stays available for other cycles.)
+            # Username resolve failure: this account can't see the group (account-restricted).
+            # Don't permanently ban per-group, but track consecutive failures.
+            # After 5 consecutive resolve failures, auto-exclude from this campaign.
+            if _is_username_resolve_error(str(e)):
+                fails = _account_resolve_failures.setdefault(camp_id, {})
+                fails[acc["id"]] = fails.get(acc["id"], 0) + 1
+                if fails[acc["id"]] >= RESOLVE_FAIL_THRESHOLD:
+                    logger.info(
+                        f"Campaign {camp_id}: account {acc.get('name',acc['id'])} "
+                        f"auto-excluded after {fails[acc['id']]} consecutive resolve failures"
+                    )
         finally:
             _active_sends.discard(send_key)
 
@@ -805,11 +832,14 @@ async def campaign_loop(campaign_id: str):
             sem = asyncio.Semaphore(conc)
             dead_count = len(_campaign_dead_groups.get(campaign_id, set()))
             ban_count = len(_campaign_bans.get(campaign_id, set()))
+            resolve_fail_map = _account_resolve_failures.get(campaign_id, {})
+            restricted_count = sum(1 for v in resolve_fail_map.values() if v >= RESOLVE_FAIL_THRESHOLD)
             live_groups = len(groups) - dead_count
             logger.info(
                 f"Campaign {campaign.get('name')} cycle start: "
                 f"{live_groups}/{len(groups)} live groups ({dead_count} dead), "
-                f"{len(accounts)} accounts ({ban_count} group-bans), conc={conc}, interval={interval}s"
+                f"{len(accounts)} accounts ({ban_count} group-bans, {restricted_count} restricted), "
+                f"conc={conc}, interval={interval}s"
             )
 
             async def bounded(i, grp):
@@ -858,8 +888,13 @@ async def campaign_loop(campaign_id: str):
         # Clean up per-campaign maps — new campaign start = fresh slate
         bans = _campaign_bans.pop(campaign_id, set())
         dead = _campaign_dead_groups.pop(campaign_id, set())
-        if bans or dead:
-            logger.info(f"Campaign {campaign_id}: cleared {len(bans)} account-group bans, {len(dead)} dead groups")
+        resolve_excluded = _account_resolve_failures.pop(campaign_id, {})
+        restricted = sum(1 for v in resolve_excluded.values() if v >= RESOLVE_FAIL_THRESHOLD)
+        if bans or dead or restricted:
+            logger.info(
+                f"Campaign {campaign_id}: cleared {len(bans)} account-group bans, "
+                f"{len(dead)} dead groups, {restricted} restricted accounts"
+            )
 
 
 async def log_send(campaign, acc, grp, status, error):
