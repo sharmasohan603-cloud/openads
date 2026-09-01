@@ -27,6 +27,7 @@ from starlette.responses import Response, StreamingResponse
 import telegram_service as tg
 import storage
 from auth import require_auth, authenticate_user
+from api_pool import get_random_api
 
 # ── Cross-campaign dedup guard ─────────────────────────────────────────────
 # (account_id, group_id) pairs currently being sent to in ANY campaign.
@@ -73,8 +74,6 @@ def now_iso():
 # ----------------------- Models -----------------------
 class AccountCreate(BaseModel):
     name: str
-    api_id: int
-    api_hash: str
     session_string: str
 
 
@@ -136,16 +135,17 @@ async def login(payload: LoginRequest):
 # ----------------------- Account routes -----------------------
 @api_router.post("/accounts")
 async def add_account(payload: AccountCreate, _user: str = Depends(require_auth)):
+    api_id, api_hash = get_random_api()
     try:
-        info = await tg.validate_account(payload.api_id, payload.api_hash, payload.session_string)
+        info = await tg.validate_account(api_id, api_hash, payload.session_string)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Session validation failed: {e}")
 
     acc = {
         "id": str(uuid.uuid4()),
         "name": payload.name,
-        "api_id": payload.api_id,
-        "api_hash": payload.api_hash,
+        "api_id": api_id,
+        "api_hash": api_hash,
         "session_string": payload.session_string,
         "phone": info.get("phone"),
         "username": info.get("username"),
@@ -177,9 +177,9 @@ def _new_account_doc(name, api_id, api_hash, session_string, info, batch_id, bat
 @api_router.post("/accounts/upload")
 async def upload_account(
     name: str = Form(...),
-    api_id: int = Form(...),
-    api_hash: str = Form(...),
     file: UploadFile = File(...),
+    api_id: Optional[int] = Form(None),
+    api_hash: Optional[str] = Form(None),
     batch_id: Optional[str] = Form(None),
     _user: str = Depends(require_auth),
 ):
@@ -216,13 +216,15 @@ async def upload_account(
     created, errors = [], []
     multi = len(sessions) > 1
     for label, data in sessions:
+        # Each session gets a random API ID from the pool
+        rand_api_id, rand_api_hash = get_random_api()
         try:
-            string_session, info = await tg.session_file_to_string(data, api_id, api_hash)
+            string_session, info = await tg.session_file_to_string(data, rand_api_id, rand_api_hash)
         except Exception as e:
             errors.append({"file": label, "error": str(e)})
             continue
         acc_name = f"{batch_name} - {label}"
-        acc = _new_account_doc(acc_name, api_id, api_hash, string_session, info, batch_id, batch_name)
+        acc = _new_account_doc(acc_name, rand_api_id, rand_api_hash, string_session, info, batch_id, batch_name)
         await db.accounts.insert_one(acc)
         created.append(account_public(acc))
 

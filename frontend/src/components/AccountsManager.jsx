@@ -23,7 +23,7 @@ import {
 } from "./ui/select";
 import { api } from "../api";
 
-const empty = { name: "", api_id: "", api_hash: "" };
+const empty = { name: "" };
 
 export const AccountsManager = ({ accounts, accountGroups = [], onRefresh }) => {
   const [open, setOpen] = useState(false);
@@ -38,10 +38,7 @@ export const AccountsManager = ({ accounts, accountGroups = [], onRefresh }) => 
       toast.error("Enter a section name for the new folder");
       return;
     }
-    if (!form.api_id || !form.api_hash) {
-      toast.error("API ID and API Hash are required");
-      return;
-    }
+
     if (!file) {
       toast.error("Please select a .session file or a .zip");
       return;
@@ -50,8 +47,7 @@ export const AccountsManager = ({ accounts, accountGroups = [], onRefresh }) => 
     try {
       const fd = new FormData();
       fd.append("name", isNew ? form.name : "");
-      fd.append("api_id", form.api_id);
-      fd.append("api_hash", form.api_hash);
+
       fd.append("file", file);
       if (!isNew) {
         fd.append("batch_id", selectedBatch);
@@ -157,28 +153,7 @@ export const AccountsManager = ({ accounts, accountGroups = [], onRefresh }) => 
                 </div>
               )}
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label className="text-slate-300">API ID</Label>
-                  <Input
-                    data-testid="account-apiid-input"
-                    placeholder="1234567"
-                    value={form.api_id}
-                    onChange={(e) => setForm({ ...form, api_id: e.target.value })}
-                    className="bg-slate-950 border-slate-700 text-slate-100 font-mono"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-slate-300">API Hash</Label>
-                  <Input
-                    data-testid="account-apihash-input"
-                    placeholder="abcd1234..."
-                    value={form.api_hash}
-                    onChange={(e) => setForm({ ...form, api_hash: e.target.value })}
-                    className="bg-slate-950 border-slate-700 text-slate-100 font-mono"
-                  />
-                </div>
-              </div>
+
               <div className="space-y-1.5">
                 <Label className="text-slate-300">Session File (.session or .zip)</Label>
                 <label
