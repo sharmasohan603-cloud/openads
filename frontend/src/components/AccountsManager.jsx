@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
-import { Plus, Trash2, UserCircle2, Loader2, KeyRound, ShieldCheck, Upload, FileArchive, Shield, ShieldOff, FolderPlus, FolderOpen } from "lucide-react";
+import { Plus, Trash2, UserCircle2, Loader2, KeyRound, ShieldCheck, Upload, FileArchive, Shield, ShieldOff, FolderPlus, FolderOpen, ChevronDown, ChevronRight, AlertTriangle } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -31,6 +31,9 @@ export const AccountsManager = ({ accounts, accountGroups = [], onRefresh }) => 
   const [file, setFile] = useState(null);
   const [saving, setSaving] = useState(false);
   const [selectedBatch, setSelectedBatch] = useState("new");
+  const [deletingBatch, setDeletingBatch] = useState(null); // batch object to confirm delete
+  const [deleting, setDeleting] = useState(false);
+  const [expandedBatches, setExpandedBatches] = useState({}); // {batch_id: true/false}
 
   const submit = async () => {
     const isNew = selectedBatch === "new";
@@ -81,7 +84,37 @@ export const AccountsManager = ({ accounts, accountGroups = [], onRefresh }) => 
     }
   };
 
+  const removeBatch = async () => {
+    if (!deletingBatch) return;
+    setDeleting(true);
+    try {
+      const res = await api.deleteBatch(deletingBatch.batch_id);
+      toast.success(`Deleted ${res.deleted} accounts from "${res.batch_name}"`);
+      setDeletingBatch(null);
+      onRefresh();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to delete batch");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const toggleBatch = (batchId) => {
+    setExpandedBatches((prev) => ({ ...prev, [batchId]: !prev[batchId] }));
+  };
+
   const selectedGroup = accountGroups.find((g) => g.batch_id === selectedBatch);
+
+  // Group accounts by batch
+  const batchMap = {};
+  accounts.forEach((a) => {
+    const key = a.batch_id || "_ungrouped";
+    if (!batchMap[key]) {
+      batchMap[key] = { batch_id: key, batch_name: a.batch_name || "Ungrouped", accounts: [] };
+    }
+    batchMap[key].accounts.push(a);
+  });
+  const batches = Object.values(batchMap).sort((a, b) => b.accounts.length - a.accounts.length);
 
   return (
     <section data-testid="accounts-manager-section">
@@ -199,70 +232,145 @@ export const AccountsManager = ({ accounts, accountGroups = [], onRefresh }) => 
         </Dialog>
       </div>
 
+      {/* ── Delete Batch Confirmation Dialog ── */}
+      <Dialog open={!!deletingBatch} onOpenChange={(v) => !v && setDeletingBatch(null)}>
+        <DialogContent className="bg-slate-900 border-slate-800 text-slate-100 max-w-md">
+          <DialogHeader>
+            <DialogTitle className="font-display flex items-center gap-2 text-rose-400">
+              <AlertTriangle size={18} /> Delete Entire Section
+            </DialogTitle>
+            <DialogDescription className="text-slate-400">
+              This will permanently delete <span className="text-white font-semibold">{deletingBatch?.accounts?.length || deletingBatch?.count || 0}</span> accounts
+              from <span className="text-white font-semibold">"{deletingBatch?.batch_name}"</span>.
+              Any campaigns using this section will be stopped.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              variant="ghost"
+              onClick={() => setDeletingBatch(null)}
+              className="text-slate-300 hover:text-white"
+            >
+              Cancel
+            </Button>
+            <Button
+              data-testid="confirm-delete-batch"
+              onClick={removeBatch}
+              disabled={deleting}
+              className="bg-rose-600 hover:bg-rose-500 text-white gap-2"
+            >
+              {deleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+              {deleting ? "Deleting..." : `Delete ${deletingBatch?.accounts?.length || deletingBatch?.count || 0} Accounts`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {accounts.length === 0 ? (
         <div className="rounded-xl border border-dashed border-slate-800 bg-slate-900/40 p-12 text-center">
           <UserCircle2 className="mx-auto text-slate-700" size={40} />
           <p className="mt-3 text-slate-400 text-sm">No accounts connected yet.</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {accounts.map((a, i) => (
-            <motion.div
-              key={a.id}
-              data-testid={`account-card-${a.id}`}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.25, delay: i * 0.05 }}
-              className="rounded-xl border border-slate-800 bg-slate-900/90 p-5 hover:border-indigo-500/30 transition-all duration-200"
-            >
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="h-11 w-11 rounded-full bg-gradient-to-br from-indigo-500/30 to-indigo-500/30 flex items-center justify-center border border-slate-700">
-                    <UserCircle2 className="text-indigo-300" size={22} />
-                  </div>
-                  <div>
-                    <p className="font-semibold text-white leading-tight">{a.name}</p>
-                    <p className="text-xs text-slate-500">{a.display_name}</p>
-                  </div>
-                </div>
-                <span
-                  data-testid={`account-status-badge-${a.id}`}
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium ${
-                    a.status === "connected"
-                      ? "bg-indigo-500/10 text-indigo-400 border border-indigo-500/20"
-                      : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
-                  }`}
+        <div className="space-y-4">
+          {batches.map((batch) => {
+            const isExpanded = expandedBatches[batch.batch_id] ?? false;
+            return (
+              <div key={batch.batch_id} className="rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden">
+                {/* Batch Header */}
+                <div
+                  className="flex items-center justify-between px-5 py-3.5 cursor-pointer hover:bg-slate-800/40 transition-colors"
+                  onClick={() => toggleBatch(batch.batch_id)}
                 >
-                  <span className="h-1.5 w-1.5 rounded-full bg-current" /> {a.status}
-                </span>
-              </div>
-              <div className="mt-4 space-y-1.5 text-xs font-mono text-slate-400">
-                <p>@{a.username || "n/a"}</p>
-                <p>{a.phone || "hidden number"}</p>
-                {a.batch_name && (
-                  <p className="flex items-center gap-1.5 text-slate-500">
-                    <FolderOpen size={11} /> {a.batch_name}
-                  </p>
+                  <div className="flex items-center gap-3">
+                    {isExpanded ? (
+                      <ChevronDown size={16} className="text-slate-400" />
+                    ) : (
+                      <ChevronRight size={16} className="text-slate-400" />
+                    )}
+                    <FolderOpen size={16} className="text-indigo-400" />
+                    <span className="font-semibold text-white">{batch.batch_name}</span>
+                    <span className="text-xs text-slate-500 bg-slate-800 px-2 py-0.5 rounded-full">
+                      {batch.accounts.length} accounts
+                    </span>
+                  </div>
+                  <Button
+                    data-testid={`delete-batch-${batch.batch_id}`}
+                    variant="ghost"
+                    size="sm"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDeletingBatch(batch);
+                    }}
+                    className="text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 gap-1.5 px-2.5 text-xs"
+                  >
+                    <Trash2 size={13} /> Delete Section
+                  </Button>
+                </div>
+
+                {/* Expanded Account Cards */}
+                {isExpanded && (
+                  <div className="px-5 pb-4 pt-1">
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                      {batch.accounts.map((a, i) => (
+                        <motion.div
+                          key={a.id}
+                          data-testid={`account-card-${a.id}`}
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: 0.25, delay: i * 0.03 }}
+                          className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 hover:border-indigo-500/30 transition-all duration-200"
+                        >
+                          <div className="flex items-start justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="h-10 w-10 rounded-full bg-gradient-to-br from-indigo-500/30 to-indigo-500/30 flex items-center justify-center border border-slate-700">
+                                <UserCircle2 className="text-indigo-300" size={20} />
+                              </div>
+                              <div>
+                                <p className="font-semibold text-white leading-tight text-sm">{a.name}</p>
+                                <p className="text-xs text-slate-500">{a.display_name}</p>
+                              </div>
+                            </div>
+                            <span
+                              data-testid={`account-status-badge-${a.id}`}
+                              className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                                a.status === "connected"
+                                  ? "bg-indigo-500/10 text-indigo-400 border border-indigo-500/20"
+                                  : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+                              }`}
+                            >
+                              <span className="h-1.5 w-1.5 rounded-full bg-current" /> {a.status}
+                            </span>
+                          </div>
+                          <div className="mt-3 space-y-1 text-xs font-mono text-slate-400">
+                            <p>@{a.username || "n/a"}</p>
+                            <p>{a.phone || "hidden number"}</p>
+                            {a.proxy_label ? (
+                              <p className="flex items-center gap-1.5 text-indigo-400/80"><Shield size={11} /> {a.proxy_label}</p>
+                            ) : (
+                              <p className="flex items-center gap-1.5 text-slate-600"><ShieldOff size={11} /> direct (no proxy)</p>
+                            )}
+                          </div>
+                          <Button
+                            data-testid={`account-delete-${a.id}`}
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => remove(a.id)}
+                            className="mt-3 text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 gap-2 px-2 text-xs"
+                          >
+                            <Trash2 size={13} /> Remove
+                          </Button>
+                        </motion.div>
+                      ))}
+                    </div>
+                  </div>
                 )}
-                {a.proxy_label ? (
-                  <p className="flex items-center gap-1.5 text-indigo-400/80"><Shield size={11} /> {a.proxy_label}</p>
-                ) : (
-                  <p className="flex items-center gap-1.5 text-slate-600"><ShieldOff size={11} /> direct (no proxy)</p>
-                )}
               </div>
-              <Button
-                data-testid={`account-delete-${a.id}`}
-                variant="ghost"
-                size="sm"
-                onClick={() => remove(a.id)}
-                className="mt-4 text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 gap-2 px-2"
-              >
-                <Trash2 size={14} /> Remove
-              </Button>
-            </motion.div>
-          ))}
+            );
+          })}
         </div>
       )}
     </section>
   );
 };
+

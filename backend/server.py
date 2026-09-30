@@ -252,6 +252,42 @@ async def account_groups(_user: str = Depends(require_auth)):
     ]
 
 
+@api_router.delete("/account-groups/{batch_id}")
+async def delete_account_group(batch_id: str, _user: str = Depends(require_auth)):
+    """Delete an entire account section/batch by batch_id."""
+    accounts = await db.accounts.find({"batch_id": batch_id}).to_list(20000)
+    if not accounts:
+        raise HTTPException(status_code=404, detail="No accounts found for this batch")
+
+    batch_name = accounts[0].get("batch_name", "Unknown")
+
+    # Stop any campaigns using this batch
+    related_camps = await db.campaigns.find({"account_batch_id": batch_id}).to_list(1000)
+    for c in related_camps:
+        tg.stop_campaign_task(c["id"])
+    if related_camps:
+        await db.campaigns.update_many(
+            {"account_batch_id": batch_id},
+            {"$set": {"status": "stopped", "last_error": "Account section deleted"}},
+        )
+
+    # Disconnect all clients
+    for acc in accounts:
+        try:
+            await tg.disconnect_client(acc["id"])
+        except Exception:
+            pass
+
+    # Delete all accounts in this batch
+    result = await db.accounts.delete_many({"batch_id": batch_id})
+
+    return {
+        "ok": True,
+        "deleted": result.deleted_count,
+        "batch_name": batch_name,
+    }
+
+
 @api_router.get("/accounts")
 async def list_accounts(_user: str = Depends(require_auth)):
     docs = await db.accounts.find({}, {"_id": 0, "session_string": 0, "api_hash": 0, "proxy": 0}).to_list(5000)

@@ -44,6 +44,7 @@ export const api = {
   uploadAccount: (formData) =>
     client.post("/accounts/upload", formData, { headers: { "Content-Type": "multipart/form-data" } }).then((r) => r.data),
   deleteAccount: (id) => client.delete(`/accounts/${id}`).then((r) => r.data),
+  deleteBatch: (batchId) => client.delete(`/account-groups/${batchId}`).then((r) => r.data),
   getGroups: (id) => client.get(`/accounts/${id}/groups`).then((r) => r.data),
 
   // Session tester
