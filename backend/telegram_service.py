@@ -56,6 +56,23 @@ _account_cooldowns: dict[str, float] = {}
 _media_cache: OrderedDict[str, tuple[bytes, str]] = OrderedDict()
 _MEDIA_CACHE_MAX = 20
 
+# ── Uploaded Telegram file-handle cache ───────────────────────────────────────
+# Passing raw bytes to client.send_file re-uploads the file to Telegram on EVERY
+# group — the dominant egress cost. Telethon reuses an already-uploaded InputFile
+# handle without re-uploading, so we cache the handle per (account, media_path).
+# Keyed "account_id:media_path" -> (input_file_handle, monotonic_ts).
+# TTL-bounded because Telegram eventually garbage-collects unreferenced uploads.
+_uploaded_media: OrderedDict[str, tuple] = OrderedDict()
+_uploaded_locks: dict[str, asyncio.Lock] = {}
+_UPLOADED_MAX = 256
+_UPLOADED_TTL = 600  # seconds — re-upload after this to avoid stale file references
+
+# Telegram errors that mean a reused upload handle went stale and must be re-sent.
+_STALE_FILE_MARKERS = (
+    "file_reference", "file reference", "filepartmissing", "file_part",
+    "fileparts", "file_id_invalid", "input file", "media_empty",
+)
+
 # Injected by server.py at startup — allows MongoDB-aware media fetch
 # without circular imports. Falls back to storage.get_object.
 _media_fetcher = None
@@ -153,6 +170,7 @@ def cleanup_join_cache_for_accounts(account_ids: set):
     for aid in account_ids:
         _client_locks.pop(aid, None)
         _join_locks.pop(aid, None)
+        invalidate_uploaded_media(account_id=aid)
 
 
 # ── Media cache helpers ───────────────────────────────────────────────────────
@@ -182,6 +200,8 @@ def invalidate_media_cache(media_path: str = None):
         _media_cache.pop(media_path, None)
     else:
         _media_cache.clear()
+    # Uploaded handles reference the old bytes — drop them too so changed media re-uploads.
+    invalidate_uploaded_media(media_path=media_path)
 
 
 # ── Proxy helpers ─────────────────────────────────────────────────────────────
@@ -242,7 +262,13 @@ async def build_client(api_id: int, api_hash: str, session_string: str, proxy=No
     ptuple = _proxy_tuple(proxy)
     if ptuple:
         kwargs["proxy"] = ptuple
-    client = TelegramClient(StringSession(session_string), api_id, api_hash, **kwargs)
+    # Cap reconnects so a dropped connection doesn't retry-storm Telegram.
+    # Infinite auto-reconnect across 263 accounts saturates the single server IP,
+    # which makes Telegram drop even more connections ("0 bytes read on 8 expected").
+    client = TelegramClient(
+        StringSession(session_string), api_id, api_hash,
+        connection_retries=3, retry_delay=2, timeout=15, **kwargs,
+    )
     await client.connect()
     return client
 
@@ -339,7 +365,10 @@ async def session_file_to_string(file_bytes: bytes, api_id: int, api_hash: str):
         base = os.path.join(d, "acc")
         with open(base + ".session", "wb") as f:
             f.write(file_bytes)
-        client = TelegramClient(base, int(api_id), api_hash)
+        # Fail fast during validation — don't let a throttled IP trigger an
+        # endless reconnect loop that falsely reports good sessions as failed.
+        client = TelegramClient(base, int(api_id), api_hash,
+                                connection_retries=2, retry_delay=3, timeout=15)
         await client.connect()
         try:
             if not await client.is_user_authorized():
@@ -608,30 +637,100 @@ def _is_media_restricted(exc: Exception) -> bool:
     )
 
 
-async def _try_send_media(client: TelegramClient, entity, data: bytes, filename: str, caption: str):
+def _is_stale_file_ref(exc: Exception) -> bool:
+    """True when a reused upload handle expired and the file must be re-uploaded."""
+    s = str(exc).lower()
+    return any(m in s for m in _STALE_FILE_MARKERS)
+
+
+async def _get_uploaded_handle(client: TelegramClient, account_id: str, media_path: str,
+                               data: bytes, filename: str):
+    """Upload the media ONCE per (account, media_path) and reuse the handle.
+
+    Reusing the returned InputFile across every group means Telegram keeps the
+    file server-side — no re-upload per group. This is the main egress fix.
+    """
+    # Without identity keys we can't cache safely — fall back to a one-off upload.
+    if not account_id or not media_path:
+        buf = io.BytesIO(data)
+        buf.name = filename
+        return await client.upload_file(buf)
+
+    key = f"{account_id}:{media_path}"
+    lock = _uploaded_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        now = time.monotonic()
+        cached = _uploaded_media.get(key)
+        if cached and now - cached[1] < _UPLOADED_TTL:
+            _uploaded_media.move_to_end(key)
+            return cached[0]
+        buf = io.BytesIO(data)
+        buf.name = filename
+        handle = await client.upload_file(buf)
+        _uploaded_media[key] = (handle, now)
+        _uploaded_media.move_to_end(key)
+        while len(_uploaded_media) > _UPLOADED_MAX:
+            old_key, _ = _uploaded_media.popitem(last=False)
+            _uploaded_locks.pop(old_key, None)
+        return handle
+
+
+def invalidate_uploaded_media(account_id: str = None, media_path: str = None):
+    """Drop cached upload handles (specific account+media, all of a media, or everything)."""
+    if account_id and media_path:
+        key = f"{account_id}:{media_path}"
+        _uploaded_media.pop(key, None)
+        _uploaded_locks.pop(key, None)
+    elif media_path:
+        for k in [k for k in _uploaded_media if k.endswith(f":{media_path}")]:
+            _uploaded_media.pop(k, None)
+            _uploaded_locks.pop(k, None)
+    elif account_id:
+        for k in [k for k in _uploaded_media if k.startswith(f"{account_id}:")]:
+            _uploaded_media.pop(k, None)
+            _uploaded_locks.pop(k, None)
+    else:
+        _uploaded_media.clear()
+        _uploaded_locks.clear()
+
+
+async def _try_send_media(client: TelegramClient, entity, data: bytes, filename: str, caption: str,
+                          account_id: str = None, media_path: str = None):
     """Send image/video; retry as document; if group blocks media, send text only.
 
     Catches ALL exceptions (not just RPCError) so that no media-related error
     can prevent the text fallback from firing.
     Re-raises FloodWaitError immediately — those need cooldown handling upstream.
+    The media is uploaded once per account and the handle reused across groups.
     """
     caption = (caption or "").strip() or None
-    last_err = None
 
-    for force_document in (False, True):
-        buf = io.BytesIO(data)
-        buf.name = filename
-        try:
-            await client.send_file(entity, buf, caption=caption, force_document=force_document)
-            if force_document:
-                return "Sent as file attachment (inline media blocked)"
-            return None
-        except Exception as e:
-            # Re-raise flood errors immediately — those need cooldown, not fallback
-            if _is_flood_error(e):
-                raise
-            last_err = e
-            logger.debug(f"Media send attempt failed (force_doc={force_document}): {e}")
+    async def _attempt(handle):
+        """Try inline photo/video, then as document. Returns (ok, note, last_err)."""
+        last = None
+        for force_document in (False, True):
+            try:
+                await client.send_file(entity, handle, caption=caption, force_document=force_document)
+                return True, ("Sent as file attachment (inline media blocked)" if force_document else None), None
+            except Exception as e:
+                # Re-raise flood errors immediately — those need cooldown, not fallback
+                if _is_flood_error(e):
+                    raise
+                last = e
+                logger.debug(f"Media send attempt failed (force_doc={force_document}): {e}")
+        return False, None, last
+
+    handle = await _get_uploaded_handle(client, account_id, media_path, data, filename)
+    ok, note, last_err = await _attempt(handle)
+
+    # A reused handle may have been garbage-collected by Telegram — re-upload once.
+    if not ok and media_path and last_err is not None and _is_stale_file_ref(last_err):
+        invalidate_uploaded_media(account_id, media_path)
+        handle = await _get_uploaded_handle(client, account_id, media_path, data, filename)
+        ok, note, last_err = await _attempt(handle)
+
+    if ok:
+        return note
 
     # --- Text fallback ---
     if not caption:
@@ -646,7 +745,7 @@ async def _try_send_media(client: TelegramClient, entity, data: bytes, filename:
         raise text_err
 
 
-async def _send_with_entity(client: TelegramClient, entity, mtype: str, campaign: dict, text: str, join_note=None):
+async def _send_with_entity(client: TelegramClient, entity, mtype: str, campaign: dict, text: str, join_note=None, account_id: str = None):
     note = join_note
 
     if mtype == "text":
@@ -660,7 +759,8 @@ async def _send_with_entity(client: TelegramClient, entity, mtype: str, campaign
         # Use cached media — avoids re-fetching the same file for every group in the cycle
         data, content_type = await _get_cached_media(media_path)
         filename = _media_filename(campaign, media_path, content_type)
-        media_note = await _try_send_media(client, entity, data, filename, text)
+        media_note = await _try_send_media(client, entity, data, filename, text,
+                                           account_id=account_id, media_path=media_path)
         if media_note and note:
             return f"{note}; {media_note}"
         return media_note or note
@@ -802,7 +902,7 @@ async def send_ad_to_group(
 
     for attempt in range(2):
         try:
-            return await _send_with_entity(client, entity, mtype, campaign, text, join_note)
+            return await _send_with_entity(client, entity, mtype, campaign, text, join_note, account_id=account_id)
         except Exception as e:
             if attempt == 0 and (_needs_join(e) or _needs_discussion_join(e)):
                 join_note = await _try_join(client, account_id, group_id, entity)
