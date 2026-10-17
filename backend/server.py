@@ -221,12 +221,21 @@ async def upload_account(
         try:
             string_session, info = await tg.session_file_to_string(data, rand_api_id, rand_api_hash)
         except Exception as e:
+            # Log every failed session so discarded accounts are never invisible.
+            # These are NOT saved to the DB — the file is reported back and logged only.
+            logger.warning(f"Session load failed for '{label}' (batch '{batch_name}'): {e}")
             errors.append({"file": label, "error": str(e)})
             continue
         acc_name = f"{batch_name} - {label}"
         acc = _new_account_doc(acc_name, rand_api_id, rand_api_hash, string_session, info, batch_id, batch_name)
         await db.accounts.insert_one(acc)
         created.append(account_public(acc))
+
+    if errors:
+        logger.warning(
+            f"Upload to batch '{batch_name}': {len(created)} loaded, {len(errors)} failed "
+            f"({', '.join(e['file'] for e in errors)})"
+        )
 
     if not created:
         detail = "; ".join(f"{e['file']}: {e['error']}" for e in errors) or "No sessions processed"

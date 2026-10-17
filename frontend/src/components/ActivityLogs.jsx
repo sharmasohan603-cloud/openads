@@ -12,6 +12,7 @@ const FILTERS = [
 
 export const ActivityLogs = ({ logs, onRefresh }) => {
   const [filter, setFilter] = useState("all");
+  const [campaign, setCampaign] = useState("all");
 
   const clear = async () => {
     try {
@@ -23,7 +24,18 @@ export const ActivityLogs = ({ logs, onRefresh }) => {
     }
   };
 
-  const rows = logs.filter((l) => filter === "all" || l.status === filter);
+  // Unique campaign names present in the current logs, for the dropdown.
+  const campaignNames = [...new Set(logs.map((l) => l.campaign_name).filter(Boolean))].sort();
+
+  const rows = logs.filter(
+    (l) =>
+      (filter === "all" || l.status === filter) &&
+      (campaign === "all" || l.campaign_name === campaign)
+  );
+
+  // Sent vs failed in the current view — lets you compare how a campaign is doing.
+  const sentCount = rows.filter((l) => l.status === "success").length;
+  const failedCount = rows.filter((l) => l.status === "failed").length;
 
   return (
     <section data-testid="activity-logs-table">
@@ -43,7 +55,7 @@ export const ActivityLogs = ({ logs, onRefresh }) => {
         </Button>
       </div>
 
-      <div className="flex items-center gap-2 mb-4">
+      <div className="flex flex-wrap items-center gap-2 mb-4">
         <Filter size={14} className="text-slate-500" />
         {FILTERS.map((f) => (
           <button
@@ -59,6 +71,24 @@ export const ActivityLogs = ({ logs, onRefresh }) => {
             {f.label}
           </button>
         ))}
+
+        <select
+          data-testid="log-filter-campaign"
+          value={campaign}
+          onChange={(e) => setCampaign(e.target.value)}
+          className="ml-1 px-3 py-1.5 rounded-full text-xs font-medium bg-slate-900 text-slate-300 border border-slate-800 hover:text-slate-200 focus:outline-none focus:border-indigo-500/40"
+        >
+          <option value="all">All campaigns</option>
+          {campaignNames.map((name) => (
+            <option key={name} value={name}>{name}</option>
+          ))}
+        </select>
+
+        <span className="ml-auto text-xs text-slate-500">
+          <span className="text-indigo-400">{sentCount} sent</span>
+          {" · "}
+          <span className="text-rose-400">{failedCount} failed</span>
+        </span>
       </div>
 
       <div className="rounded-xl border border-slate-800 bg-slate-900/90 overflow-hidden">
