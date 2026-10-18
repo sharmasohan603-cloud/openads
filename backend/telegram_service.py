@@ -87,7 +87,9 @@ def set_media_fetcher(fetcher):
 
 
 # ── Tunables ─────────────────────────────────────────────────────────────────
-CONCURRENCY = int(os.environ.get("MAX_CONCURRENCY", "12"))
+# Lowered 12 -> 6: climbing JoinChannel/SendMedia flood waits on a single IP mean
+# we were pushing too many simultaneous sends. Fewer at once = fewer FloodWaits/bans.
+CONCURRENCY = int(os.environ.get("MAX_CONCURRENCY", "6"))
 # Keep at most this many Telegram sessions connected
 MAX_CACHED_CLIENTS = int(os.environ.get("MAX_CLIENTS", "50"))
 # Per-attempt time-boxes (seconds) so a dead account/proxy can't stall a cycle

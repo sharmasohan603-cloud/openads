@@ -585,6 +585,9 @@ async def serve_upload(path: str, _user: str = Depends(require_auth)):
 MAX_ACCOUNT_TRIES = 12
 # Unified concurrency constant — same value used in create_campaign and campaign_loop.
 MAX_CONCURRENCY = int(os.environ.get("MAX_CONCURRENCY", str(tg.CONCURRENCY)))
+# Stagger campaign starts so multiple campaigns don't fire cycles in lockstep and
+# slam the single IP at the same instant (reduces simultaneous FloodWaits).
+STARTUP_STAGGER_MAX = int(os.environ.get("CAMPAIGN_STAGGER_MAX", "45"))
 
 # ── Batched counter state ─────────────────────────────────────────────────
 # campaign_id -> {"sent": int, "failed": int, "last_flush": float}
@@ -846,6 +849,10 @@ async def campaign_loop(campaign_id: str):
     FloodWait is handled per-account with cooldowns; CancelledError propagates correctly.
     """
     try:
+        # One-time startup stagger: desync this campaign from others so their cycles
+        # don't align and hammer the IP simultaneously. CancelledError still propagates.
+        if STARTUP_STAGGER_MAX > 0:
+            await asyncio.sleep(random.uniform(0, STARTUP_STAGGER_MAX))
         while True:
             campaign = await db.campaigns.find_one({"id": campaign_id})
             if not campaign or campaign.get("status") != "running":
