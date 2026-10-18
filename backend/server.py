@@ -710,6 +710,33 @@ def _is_dead_group_error(err: str) -> bool:
         "groupdeactivated",
     ))
 
+
+def _db_cooldown_active(acc: dict) -> bool:
+    """True if the account's PERSISTED cooldown (survives restarts) is still active.
+
+    In-memory cooldowns (tg._account_cooldowns) are wiped on every redeploy, so a
+    FloodWaited account would be retried immediately after a deploy and re-flooded.
+    The absolute 'cooldown_until' timestamp on the account doc closes that gap.
+    """
+    cu = acc.get("cooldown_until")
+    if not cu:
+        return False
+    try:
+        return datetime.fromisoformat(cu) > datetime.now(timezone.utc)
+    except (ValueError, TypeError):
+        return False
+
+
+async def _set_cooldown(account_id: str, seconds: int):
+    """Record a FloodWait cooldown both in-memory (fast) and in the DB (durable)."""
+    tg.set_account_cooldown(account_id, seconds)
+    until = (datetime.now(timezone.utc) + timedelta(seconds=max(seconds, 1))).isoformat()
+    try:
+        await db.accounts.update_one({"id": account_id}, {"$set": {"cooldown_until": until}})
+    except Exception as e:
+        logger.warning(f"Failed to persist cooldown for {account_id}: {e}")
+
+
 async def _send_to_group(campaign, accounts, start_idx, grp):
     """Deliver the ad to one group. Tries accounts in rotation; handles cooldowns and dedup."""
     success, last_err, used, note, last_acc = False, None, None, None, None
@@ -720,8 +747,11 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
     if grp_id in _campaign_dead_groups.get(camp_id, set()):
         return
 
-    # Filter: skip accounts in FloodWait cooldown
-    ready_accounts = [a for a in accounts if not tg.is_account_in_cooldown(a["id"])]
+    # Filter: skip accounts in FloodWait cooldown (in-memory fast path + durable DB check)
+    ready_accounts = [
+        a for a in accounts
+        if not tg.is_account_in_cooldown(a["id"]) and not _db_cooldown_active(a)
+    ]
     if not ready_accounts:
         await log_send(campaign, None, grp, "failed", "All accounts in FloodWait cooldown")
         return
@@ -788,7 +818,7 @@ async def _send_to_group(campaign, accounts, start_idx, grp):
                 if "joinchannelrequest" in last_err.lower():
                     continue  # Join flood — try next account
                 seconds = getattr(e, "seconds", 60)
-                tg.set_account_cooldown(acc["id"], seconds)
+                await _set_cooldown(acc["id"], seconds)
                 break  # Send flood — stop trying this group
             # Permanent ban: mark in DB, try next account (account issue, not group issue)
             if tg.is_permanent_ban(e):
