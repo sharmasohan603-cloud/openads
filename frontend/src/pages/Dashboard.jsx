@@ -55,8 +55,18 @@ export default function Dashboard() {
 
   useEffect(() => {
     loadAll();
-    const t = setInterval(loadAll, 8000);
-    return () => clearInterval(t);
+    // Poll every 20s (was 8s) and skip while the tab is hidden — cuts needless
+    // egress + DB load, especially when a tab is left open during sending.
+    const t = setInterval(() => {
+      if (!document.hidden) loadAll();
+    }, 20000);
+    // Refresh immediately when the tab becomes visible again.
+    const onVisible = () => { if (!document.hidden) loadAll(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [loadAll]);
 
   const activeCampaigns = campaigns.filter((c) => c.running || c.status === "running").length;
