@@ -196,6 +196,10 @@ class _FakeClient:
     async def __call__(self, request):
         return None
 
+    async def upload_file(self, buf, **kwargs):
+        # Media is uploaded once per account then reused; return a sentinel handle.
+        return "UPLOADED_FILE_HANDLE"
+
     async def send_message(self, target, text):
         self.text_sent = (target, text)
 

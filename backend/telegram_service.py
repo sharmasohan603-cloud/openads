@@ -9,6 +9,7 @@ Key reliability features:
 - MAX_CACHED_CLIENTS is env-configurable (default 50).
 """
 import asyncio
+import inspect
 import io
 import logging
 import os
@@ -39,6 +40,12 @@ _clients: dict[str, TelegramClient] = {}
 _client_locks: dict[str, asyncio.Lock] = {}
 # account_id -> lock guarding join attempts (prevents parallel joins from same account)
 _join_locks: dict[str, asyncio.Lock] = {}
+# account_id -> lock serializing SENDS. Concurrent sends from one account are the
+# burst that escalates Telegram FloodWaits from seconds to hours; serializing them
+# (plus the per-send jitter) keeps each account's sends spaced out.
+_send_locks: dict[str, asyncio.Lock] = {}
+# account_id -> monotonic timestamp of that account's last send (for MIN_SEND_GAP)
+_last_send_at: dict[str, float] = {}
 # (account_id, group_key) pairs already joined this session — TTL 24h, max 50k entries
 # Using simple dict with manual TTL since cachetools may not be installed
 _join_attempted: dict[tuple[str, str], float] = {}
@@ -90,6 +97,9 @@ def set_media_fetcher(fetcher):
 # Lowered 12 -> 6: climbing JoinChannel/SendMedia flood waits on a single IP mean
 # we were pushing too many simultaneous sends. Fewer at once = fewer FloodWaits/bans.
 CONCURRENCY = int(os.environ.get("MAX_CONCURRENCY", "6"))
+# Optional hard floor (seconds) between two sends from the SAME account. 0 = rely
+# on per-account send serialization + jitter only. Raise it to throttle harder.
+MIN_SEND_GAP = float(os.environ.get("MIN_SEND_GAP", "0"))
 # Keep at most this many Telegram sessions connected
 MAX_CACHED_CLIENTS = int(os.environ.get("MAX_CLIENTS", "50"))
 # Per-attempt time-boxes (seconds) so a dead account/proxy can't stall a cycle
@@ -172,6 +182,8 @@ def cleanup_join_cache_for_accounts(account_ids: set):
     for aid in account_ids:
         _client_locks.pop(aid, None)
         _join_locks.pop(aid, None)
+        _send_locks.pop(aid, None)
+        _last_send_at.pop(aid, None)
         invalidate_uploaded_media(account_id=aid)
 
 
@@ -184,9 +196,13 @@ async def _get_cached_media(media_path: str) -> tuple[bytes, str]:
         _media_cache.move_to_end(media_path)
         return _media_cache[media_path]
 
-    # Use injected fetcher (MongoDB-aware) if set, otherwise fall back to storage.get_object
+    # Use injected fetcher (MongoDB-aware) if set, otherwise fall back to storage.get_object.
+    # Tolerate both async and sync fetchers so callers/tests can inject either.
     fetcher = _media_fetcher or storage.get_object
-    data, content_type = await fetcher(media_path)
+    result = fetcher(media_path)
+    if inspect.isawaitable(result):
+        result = await result
+    data, content_type = result
 
     # Evict LRU if at capacity
     while len(_media_cache) >= _MEDIA_CACHE_MAX:
@@ -892,42 +908,60 @@ async def send_ad_to_group(
 
     apply_jitter: add random 2-5s delay before sending — reduces spam-flag risk.
     Re-raises FloodWaitError for caller to handle cooldown.
+    Sends are serialized per account so one account never fires multiple sends at
+    once — concurrent sends are what escalate FloodWaits into multi-hour bans.
     """
-    if apply_jitter:
-        await asyncio.sleep(random.uniform(2.0, 5.0))
+    async def _do_send():
+        # Hard floor between this account's sends, if configured.
+        if account_id and MIN_SEND_GAP > 0:
+            last = _last_send_at.get(account_id)
+            if last is not None:
+                wait = MIN_SEND_GAP - (time.monotonic() - last)
+                if wait > 0:
+                    await asyncio.sleep(wait)
+        if apply_jitter:
+            await asyncio.sleep(random.uniform(2.0, 5.0))
 
-    mtype = campaign["message_type"]
-    text = campaign.get("text") or ""
-
-    entity = await _resolve_entity(client, group_id)
-    join_note = None
-
-    for attempt in range(2):
+        mtype = campaign["message_type"]
+        text = campaign.get("text") or ""
+        entity = await _resolve_entity(client, group_id)
+        join_note = None
         try:
-            return await _send_with_entity(client, entity, mtype, campaign, text, join_note, account_id=account_id)
-        except Exception as e:
-            if attempt == 0 and (_needs_join(e) or _needs_discussion_join(e)):
-                join_note = await _try_join(client, account_id, group_id, entity)
-                if _needs_discussion_join(e) and isinstance(entity, Channel):
-                    disc = await _join_discussion_group(client, entity)
-                    join_note = disc or join_note
-                continue
-
-            # --- Top-level media fallback safety net ---
-            if mtype == "media" and text and _is_media_restricted(e):
+            for attempt in range(2):
                 try:
-                    await client.send_message(entity, text)
-                    note = "Media blocked in group — sent text only (fallback)"
-                    if join_note:
-                        note = f"{join_note}; {note}"
-                    return note
-                except Exception as fallback_err:
-                    if _is_flood_error(fallback_err):
-                        raise
-                    logger.warning(f"Text fallback also failed for {group_id}: {fallback_err}")
-                    raise fallback_err
+                    return await _send_with_entity(client, entity, mtype, campaign, text, join_note, account_id=account_id)
+                except Exception as e:
+                    if attempt == 0 and (_needs_join(e) or _needs_discussion_join(e)):
+                        join_note = await _try_join(client, account_id, group_id, entity)
+                        if _needs_discussion_join(e) and isinstance(entity, Channel):
+                            disc = await _join_discussion_group(client, entity)
+                            join_note = disc or join_note
+                        continue
 
-            raise
+                    # --- Top-level media fallback safety net ---
+                    if mtype == "media" and text and _is_media_restricted(e):
+                        try:
+                            await client.send_message(entity, text)
+                            note = "Media blocked in group — sent text only (fallback)"
+                            if join_note:
+                                note = f"{join_note}; {note}"
+                            return note
+                        except Exception as fallback_err:
+                            if _is_flood_error(fallback_err):
+                                raise
+                            logger.warning(f"Text fallback also failed for {group_id}: {fallback_err}")
+                            raise fallback_err
+
+                    raise
+        finally:
+            if account_id:
+                _last_send_at[account_id] = time.monotonic()
+
+    if account_id:
+        lock = _send_locks.setdefault(account_id, asyncio.Lock())
+        async with lock:
+            return await _do_send()
+    return await _do_send()
 
 
 def is_campaign_running(campaign_id: str) -> bool:
